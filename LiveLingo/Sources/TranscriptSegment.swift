@@ -42,18 +42,22 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
 
     struct TranslationFailure: Codable, Equatable, Sendable {
         let reason: TranslationFailureReason
+        let rejection: TranslationAcceptance.Rejection?
         var count: Int
 
-        private enum CodingKeys: String, CodingKey { case reason, count }
+        private enum CodingKeys: String, CodingKey { case reason, rejection, count }
 
-        init(reason: TranslationFailureReason, count: Int) {
+        init(reason: TranslationFailureReason, count: Int, rejection: TranslationAcceptance.Rejection? = nil) {
             self.reason = reason
             self.count = count
+            self.rejection = reason == .translationRejected ? rejection : nil
         }
 
         init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
             reason = TranslationFailureReason(rawValue: try values.decode(String.self, forKey: .reason)) ?? .unknown
+            let code = try? values.decode(String.self, forKey: .rejection)
+            rejection = reason == .translationRejected ? code.flatMap(TranslationAcceptance.Rejection.init(rawValue:)) : nil
             count = try values.decode(Int.self, forKey: .count)
             guard count > 0 else {
                 throw DecodingError.dataCorruptedError(forKey: .count, in: values,
@@ -73,14 +77,39 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     let startTime: TimeInterval
     let endTime: TimeInterval
     /// Original source text; the legacy `english` key stays readable by 0.2.0.
-    let english: String
+    private(set) var english: String
     /// Nil is the existing English path. Only supported non-English codes persist.
     private(set) var sourceLanguage: String?
     /// In-memory provenance only. A 0.2.0 predecessor has no marker, even when
     /// its Chinese content lets the new decoder infer zh (including old yue).
     private var sourceLanguageWasInferred = false
+    /// Explicit per-caption correction, independent of the course output target.
+    /// Ordinary captions omit both new keys, preserving their archival bytes.
+    private(set) var isChineseOriginal = false
+    private(set) var chineseRecognitionOriginal: ChineseRecognitionOriginal?
+    var canUndoChineseRecognition: Bool { isChineseOriginal && chineseRecognitionOriginal != nil }
+
+    /// Content-only undo state: identity, audio times and input revision belong
+    /// to the current caption. This value cannot recursively contain a backup.
+    struct ChineseRecognitionOriginal: Codable, Equatable, Sendable {
+        let english: String
+        let chinese: String
+        let sourceLanguage: String?
+        let sourceLanguageWasInferred: Bool
+        let translationState: TranslationState
+        let translationError: String?
+        let translationFailures: [TranslationFailure]
+        let captionAnnotation: CaptionAnnotation?
+        let initialTranslationFallback: InitialTranslationFallback?
+    }
     var chinese: String {
-        didSet { reconcileLegacyTranslation() }
+        didSet {
+            if isChineseOriginal {
+                chinese = english
+                translationState = .completed
+                translationError = nil
+            } else { reconcileLegacyTranslation() }
+        }
     }
     private(set) var translationState: TranslationState
     private(set) var translationError: String?
@@ -88,6 +117,13 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     /// the trail, so intermittent failures remain diagnosable after saving.
     private(set) var translationFailures: [TranslationFailure] = []
     private(set) var captionAnnotation: CaptionAnnotation?
+    /// Display-only Apple output. A nil text records the one scheduled/failed
+    /// local request, so resuming the caption cannot repeatedly request it.
+    struct InitialTranslationFallback: Codable, Equatable, Sendable {
+        let targetCode: String
+        let text: String?
+    }
+    private(set) var initialTranslationFallback: InitialTranslationFallback?
 
     init(
         id: UUID = UUID(),
@@ -125,7 +161,55 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     var withoutTranslationFailures: Self {
         var evidence = self
         evidence.translationFailures = []
+        evidence.initialTranslationFallback = nil
+        evidence.chineseRecognitionOriginal = nil
         return evidence
+    }
+
+    /// Exports retain the corrected Chinese source, never the previous English.
+    var withoutChineseRecognitionOriginal: Self {
+        var exported = self
+        exported.chineseRecognitionOriginal = nil
+        return exported
+    }
+
+    mutating func applyChineseRecognition(_ text: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        if !isChineseOriginal, chineseRecognitionOriginal == nil {
+            chineseRecognitionOriginal = .init(english: english, chinese: chinese,
+                sourceLanguage: sourceLanguage, sourceLanguageWasInferred: sourceLanguageWasInferred,
+                translationState: translationState, translationError: translationError,
+                translationFailures: translationFailures, captionAnnotation: captionAnnotation,
+                initialTranslationFallback: initialTranslationFallback)
+        }
+        english = text
+        sourceLanguage = "zh"
+        sourceLanguageWasInferred = false
+        isChineseOriginal = true
+        chinese = text
+        translationState = .completed
+        translationError = nil
+        translationFailures = []
+        captionAnnotation = nil
+        initialTranslationFallback = nil
+    }
+
+    @discardableResult
+    mutating func undoChineseRecognition() -> Bool {
+        guard isChineseOriginal, let original = chineseRecognitionOriginal else { return false }
+        isChineseOriginal = false
+        english = original.english
+        sourceLanguage = original.sourceLanguage
+        sourceLanguageWasInferred = original.sourceLanguageWasInferred
+        chinese = original.chinese
+        translationState = original.translationState
+        translationError = original.translationError
+        translationFailures = original.translationFailures
+        captionAnnotation = original.captionAnnotation
+        initialTranslationFallback = original.initialTranslationFallback
+        chineseRecognitionOriginal = nil
+        return true
     }
 
     /// Old builds omit language metadata when writing an inputRevision. The
@@ -138,10 +222,10 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
             right.sourceLanguage = nil
         }
         // A 0.2.0 revision cannot carry the optional diagnostic trail.
-        if left.translationFailures.isEmpty || right.translationFailures.isEmpty {
-            left.translationFailures = []
-            right.translationFailures = []
-        }
+        left.translationFailures = []
+        right.translationFailures = []
+        left.initialTranslationFallback = nil
+        right.initialTranslationFallback = nil
         return left == right
     }
 
@@ -153,6 +237,9 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
             && left.translationFailures == right.translationFailures
             && left.sourceLanguage == right.sourceLanguage
             && left.captionAnnotation == right.captionAnnotation
+            && left.initialTranslationFallback == right.initialTranslationFallback
+            && left.isChineseOriginal == right.isChineseOriginal
+            && left.chineseRecognitionOriginal == right.chineseRecognitionOriginal
     }
 
     /// One rendering rule for saved transcripts, the classroom and all exports.
@@ -160,24 +247,63 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     var displayChinese: String {
         switch translationState {
         case .completed: return chinese
-        case .failed: return "（本段翻译未完成，可对照英文）"
+        case .failed: return initialTranslationDisplay ?? (modelDidNotTranslate ? "（模型未翻译此句，可对照英文）" : "（本段翻译未完成，可对照英文）")
         case .pending, .translating: return "（本段暂无译文）"
         }
     }
 
+    var modelDidNotTranslate: Bool {
+        guard translationState == .failed, let failure = translationFailures.last,
+              failure.reason == .translationRejected else { return false }
+        return failure.rejection == .modelReply || failure.rejection == .sourceEcho
+    }
+
+    var translationFailureStatus: String { modelDidNotTranslate ? "模型未翻译此句" : "本段翻译未完成" }
+
+    var initialTranslationDisplay: String? {
+        guard modelDidNotTranslate, let fallback = initialTranslationFallback,
+              fallback.targetCode == "zh-Hans", let text = fallback.text,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return "初译 · " + text
+    }
+
+    mutating func recordInitialTranslationFallback(_ text: String?, targetCode: String) {
+        guard modelDidNotTranslate, targetCode == "zh-Hans", initialTranslationFallback == nil else { return }
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        initialTranslationFallback = .init(targetCode: targetCode, text: trimmed?.isEmpty == false ? trimmed : nil)
+    }
+
+    mutating func completeInitialTranslationFallback(_ text: String, targetCode: String) {
+        guard modelDidNotTranslate, initialTranslationFallback?.targetCode == targetCode,
+              targetCode == "zh-Hans" else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        initialTranslationFallback = .init(targetCode: targetCode, text: trimmed)
+    }
+
     mutating func beginTranslation() {
+        guard !isChineseOriginal else { return }
         translationState = .translating
         translationError = nil
     }
 
     mutating func completeTranslation(_ text: String, targetCode: String = "zh-Hans") {
+        guard !isChineseOriginal else { return }
+        initialTranslationFallback = nil
+        let text = translationPreservingIsolatedI(text, targetCode: targetCode)
         let usesAnnotations = !targetCode.hasPrefix("zh")
         let formulaNotice = text.hasPrefix(TranslationAcceptance.formulaNotice)
         chinese = usesAnnotations ? TranslationAcceptance.bodyWithoutApplicationNotice(text) : text
         updateCaptionAnnotation(targetCode: targetCode, formulaUncertain: formulaNotice)
     }
 
+    func translationPreservingIsolatedI(_ text: String, targetCode: String = "zh-Hans") -> String {
+        guard targetCode.hasPrefix("zh") else { return text }
+        return QwenTranslationClient.isolatedEnglishI(english, sourceLanguage: sourceLanguage) ?? text
+    }
+
     mutating func updateCaptionAnnotation(targetCode: String, formulaUncertain: Bool = false) {
+        guard !isChineseOriginal else { return }
         guard !targetCode.hasPrefix("zh") else { return }
         switch translationState {
         case .pending, .translating: captionAnnotation = .translationPending
@@ -191,36 +317,40 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         switch captionAnnotation {
         case .formulaNeedsReview: return ClassroomFixedText.formulaNeedsReview.text(targetCode: targetCode)
         case .translationPending: return ClassroomFixedText.pendingTranslation.text(targetCode: targetCode)
-        case .translationIncomplete: return ClassroomFixedText.failedAgainstSource.text(targetCode: targetCode)
+        case .translationIncomplete: return (targetCode.hasPrefix("zh") && modelDidNotTranslate ? ClassroomFixedText.modelUntranslatedAgainstSource : .failedAgainstSource).text(targetCode: targetCode)
         case nil: return nil
         }
     }
 
     mutating func failTranslation(_ error: String) {
+        guard !isChineseOriginal else { return }
         chinese = ""
         translationState = .failed
         translationError = error
     }
 
-    mutating func recordTranslationFailure(_ reason: TranslationFailureReason) {
-        addTranslationFailure(reason, count: 1)
+    mutating func recordTranslationFailure(_ reason: TranslationFailureReason, rejection: TranslationAcceptance.Rejection? = nil) {
+        guard !isChineseOriginal else { return }
+        addTranslationFailure(reason, count: 1, rejection: rejection)
         translationError = nil
     }
 
     /// Called only after recording all failed attempts. New failures never
     /// persist an arbitrary runtime message in translationError or Chinese.
     mutating func finishFailedTranslation() {
+        guard !isChineseOriginal else { return }
         precondition(!translationFailures.isEmpty)
         chinese = ""
         translationState = .failed
         translationError = nil
     }
 
-    private mutating func addTranslationFailure(_ reason: TranslationFailureReason, count: Int) {
-        let index = translationFailures.firstIndex { $0.reason == reason }
+    private mutating func addTranslationFailure(_ reason: TranslationFailureReason, count: Int, rejection: TranslationAcceptance.Rejection? = nil) {
+        let code = reason == .translationRejected ? rejection : nil
+        let index = translationFailures.firstIndex { $0.reason == reason && $0.rejection == code }
         let previous = index.map { translationFailures.remove(at: $0).count } ?? 0
         let (sum, overflow) = previous.addingReportingOverflow(count)
-        translationFailures.append(.init(reason: reason, count: overflow ? Int.max : sum))
+        translationFailures.append(.init(reason: reason, count: overflow ? Int.max : sum, rejection: code))
     }
 
     mutating func deferTranslation() {
@@ -243,7 +373,8 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, sessionID, inputRevision, startTime, endTime, english, chinese, translationState, translationError, sourceLanguage
-        case translationFailures, captionAnnotation
+        case translationFailures, captionAnnotation, initialTranslationFallback
+        case isChineseOriginal, chineseRecognitionOriginal
     }
 
     func encode(to encoder: Encoder) throws {
@@ -259,6 +390,9 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         try values.encodeIfPresent(translationError, forKey: .translationError)
         if !translationFailures.isEmpty { try values.encode(translationFailures, forKey: .translationFailures) }
         try values.encodeIfPresent(captionAnnotation, forKey: .captionAnnotation)
+        try values.encodeIfPresent(initialTranslationFallback, forKey: .initialTranslationFallback)
+        if isChineseOriginal { try values.encode(true, forKey: .isChineseOriginal) }
+        try values.encodeIfPresent(chineseRecognitionOriginal, forKey: .chineseRecognitionOriginal)
         // Preserve marker absence across the journal's encode/decode boundary;
         // otherwise an inferred zh becomes explicit and rejects an old yue revision.
         if !sourceLanguageWasInferred { try values.encodeIfPresent(sourceLanguage, forKey: .sourceLanguage) }
@@ -292,6 +426,8 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
             translationError = try values.decodeIfPresent(String.self, forKey: .translationError)
         }
         captionAnnotation = try values.decodeIfPresent(CaptionAnnotation.self, forKey: .captionAnnotation)
+        initialTranslationFallback = try? values.decode(InitialTranslationFallback.self, forKey: .initialTranslationFallback)
+        if initialTranslationFallback?.targetCode != "zh-Hans" { initialTranslationFallback = nil }
         // This optional trail cannot make otherwise valid course content
         // unreadable. Consume entries independently so a bad one does not
         // discard its valid neighbours; core segment fields remain strict.
@@ -299,13 +435,24 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
             while !failures.isAtEnd {
                 guard let entry = try? failures.superDecoder() else { break }
                 guard let failure = try? TranslationFailure(from: entry) else { continue }
-                addTranslationFailure(failure.reason, count: failure.count)
+                addTranslationFailure(failure.reason, count: failure.count, rejection: failure.rejection)
             }
         }
         if storedLanguage == nil, translationState == .completed, english == chinese,
            EnglishTranscriptGate.verdict(english) == .hanDominant {
             sourceLanguage = "zh"
             sourceLanguageWasInferred = true
+        }
+        isChineseOriginal = try values.decodeIfPresent(Bool.self, forKey: .isChineseOriginal) ?? false
+        chineseRecognitionOriginal = try values.decodeIfPresent(ChineseRecognitionOriginal.self, forKey: .chineseRecognitionOriginal)
+        if isChineseOriginal {
+            guard sourceLanguage == "zh", !english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  english == chinese, translationState == .completed, translationError == nil,
+                  translationFailures.isEmpty, captionAnnotation == nil, initialTranslationFallback == nil else {
+                throw DecodingError.dataCorruptedError(forKey: .isChineseOriginal, in: values,
+                    debugDescription: "Chinese original caption has inconsistent content or translation state")
+            }
+            sourceLanguageWasInferred = false
         }
     }
 }

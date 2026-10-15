@@ -94,12 +94,13 @@ struct SessionArchiveTests {
             let bytes = try JSONSerialization.data(withJSONObject: ["items": [[key: "synthetic"]]])
             #expect(try SessionArchiveCoding.minimumReaderVersion(for: bytes) == 2)
         }
-        for version in 1...3 {
+        for version in 1...SessionArchiveCoding.currentReaderVersion {
             let bytes = Data("{\"schemaVersion\":\(version)}".utf8)
             try SessionArchiveCoding.checkSchema(bytes)
         }
-        #expect(throws: SessionStoreError.unsupportedSchema(4)) {
-            try SessionArchiveCoding.checkSchema(Data(#"{"schemaVersion":4}"#.utf8))
+        let future = SessionArchiveCoding.currentReaderVersion + 1
+        #expect(throws: SessionStoreError.unsupportedSchema(future)) {
+            try SessionArchiveCoding.checkSchema(Data("{\"schemaVersion\":\(future)}".utf8))
         }
     }
 
@@ -109,6 +110,80 @@ struct SessionArchiveTests {
         let object = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
         let version = try #require(object["schemaVersion"] as? Int)
         guard (1...maximum).contains(version) else { throw SessionStoreError.unsupportedSchema(version) }
+    }
+
+    // The old store checks envelope AND journal schemas before decoding or
+    // saving. Its unknown-field projection is reached only if those gates pass.
+    private func frozenOldSave(_ root: URL, maximum: Int) throws {
+        try frozenReaderGate(Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName)), maximum: maximum)
+        let journal = root.appendingPathComponent(SessionStore.journalFileName)
+        if FileManager.default.fileExists(atPath: journal.path) {
+            for line in try Data(contentsOf: journal).split(separator: 10) {
+                try frozenReaderGate(Data(line), maximum: maximum)
+            }
+        }
+        let store = SessionStore(directory: root)
+        let loaded = try #require(try store.load())
+        func project(_ value: Any) -> Any {
+            if let object = value as? [String: Any] {
+                return object.filter { $0.key != "initialTranslationFallback" }.mapValues(project)
+            }
+            if let array = value as? [Any] { return array.map(project) }
+            return value
+        }
+        let raw = try JSONSerialization.jsonObject(with: SessionArchiveCoding.encode(loaded))
+        let bytes = try JSONSerialization.data(withJSONObject: project(raw))
+        let old = try SessionArchiveCoding.decode(SessionSnapshot.self, from: bytes)
+        _ = try store.save(old)
+    }
+
+    @Test func appleFallbackRequiresReader4AndOldSaveCannotDiscardIt() throws {
+        for journalOnly in [false, true] {
+            let root = TestFixtureDirectory.root.appendingPathComponent("fallback-reader-\(UUID())", isDirectory: true)
+            let store = SessionStore(directory: root)
+            var segment = TranscriptSegment(startTime: 0, endTime: 1, english: "The room is cold.")
+            segment.recordTranslationFailure(.translationRejected, rejection: .sourceEcho)
+            segment.finishFailedTranslation()
+            var saved = try store.save(SessionSnapshot(segments: [segment], createdAt: date))
+            segment.recordInitialTranslationFallback("房间很冷。", targetCode: "zh-Hans")
+            if journalOnly {
+                saved = try store.append(.upsertSegment(segment), expectedRevision: saved.storageRevision)
+            } else {
+                saved.segments = [segment]
+                saved.captureStartedAt = date
+                saved = try store.save(saved)
+            }
+            let snapshotFile = root.appendingPathComponent(SessionStore.snapshotFileName)
+            let journalFile = root.appendingPathComponent(SessionStore.journalFileName)
+            let beforeSnapshot = try Data(contentsOf: snapshotFile)
+            let beforeJournal = try? Data(contentsOf: journalFile)
+            for maximum in [1, 2, 3] {
+                #expect(throws: (any Error).self) { try frozenOldSave(root, maximum: maximum) }
+                #expect(try Data(contentsOf: snapshotFile) == beforeSnapshot)
+                #expect((try? Data(contentsOf: journalFile)) == beforeJournal)
+            }
+            #expect(throws: SessionStoreError.unsupportedSchema(4)) { try frozenOldSave(root, maximum: 3) }
+            #expect(try store.load()?.segments.first?.displayChinese == "初译 · 房间很冷。")
+            let reloaded = try #require(try store.load())
+            _ = try store.save(reloaded)
+            #expect(try store.load()?.segments.first?.initialTranslationFallback == segment.initialTranslationFallback)
+            #expect(throws: SessionStoreError.unsupportedSchema(4)) { try frozenOldSave(root, maximum: 3) }
+        }
+    }
+
+    @Test func reader4DetectsAttemptMarkersWithoutRaisingOldCourseVersions() throws {
+        for value in [#"{"initialTranslationFallback":null}"#,
+                      #"{"items":[{"initialTranslationFallback":{"targetCode":"zh-Hans"}}],"captureStartedAt":0}"#] {
+            #expect(try SessionArchiveCoding.minimumReaderVersion(for: Data(value.utf8)) == 4)
+        }
+        #expect(try SessionArchiveCoding.minimumReaderVersion(for: Data(#"{"english":"initialTranslationFallback"}"#.utf8)) == 1)
+        var segment = TranscriptSegment(startTime: 0, endTime: 1, english: "The room is cold.")
+        segment.recordTranslationFailure(.translationRejected, rejection: .sourceEcho)
+        segment.finishFailedTranslation()
+        #expect(try SessionArchiveCoding.minimumReaderVersion(for: SessionArchiveCoding.encode(segment)) == 2)
+        segment.recordInitialTranslationFallback(nil, targetCode: "zh-Hans")
+        #expect(try SessionArchiveCoding.minimumReaderVersion(for: SessionArchiveCoding.encode(segment)) == 4)
+        #expect(try SessionArchiveCoding.minimumReaderVersion(for: SessionArchiveCoding.encode(segment.withoutTranslationFailures)) == 1)
     }
 
     @Test func savedTimeMetadataGatesOldReadersAndSurvivesJournalAndCheckpoint() throws {

@@ -5,6 +5,7 @@ import fcntl
 import importlib.util
 import json
 import os
+import plistlib
 from pathlib import Path
 import signal
 import re
@@ -81,7 +82,8 @@ def invocation_workers(scratch, host_pids, previous_workers):
     return owned, unattributed
 
 
-def preference_events(scratch, host_pids, previous_workers, allow_empty=False):
+def preference_events(scratch, host_pids, previous_workers, allow_empty=False,
+                      *, audited_workers=None):
     """Read only new, observed hosts' UUID-only audit streams, never old runs.
 
     allow_empty is for focused runs: their tests may create no preference suite.
@@ -90,8 +92,13 @@ def preference_events(scratch, host_pids, previous_workers, allow_empty=False):
     """
     events = []
     paths = []
+    identities = {}
     owned, unattributed = invocation_workers(scratch, host_pids, previous_workers)
     for worker in owned:
+        status = worker.lstat()
+        if status.st_uid != os.getuid() or not stat.S_ISDIR(status.st_mode):
+            raise ValueError('invalid worker directory')
+        identities[worker] = (status.st_dev, status.st_ino)
         path = worker / 'test-preferences.events'
         try:
             status = path.lstat()
@@ -108,20 +115,66 @@ def preference_events(scratch, host_pids, previous_workers, allow_empty=False):
         paths.append(str(path))
     if not events and (not allow_empty or not owned or unattributed):
         raise ValueError('no preference audit events for this invocation')
+    if audited_workers is not None:
+        audited_workers.update(identities)
     return events, paths
 
 
-def retire_workers(scratch, host_pids, previous_workers):
-    """Remove this invocation's audited worker directories, all inside DerivedData/tmp."""
+def retire_workers(scratch, host_pids, previous_workers, audited_workers,
+                   *, removed_workers=None):
+    """Remove only this successful invocation's audited, still-owned fixtures."""
+    if scratch.is_symlink():
+        raise ValueError('invalid worker scratch directory')
     owned, _ = invocation_workers(scratch, host_pids, previous_workers)
-    removed = []
-    for worker in owned:
+    selected = [worker for worker in owned if worker in audited_workers]
+    # Validate the complete set before deleting anything; a reused name must
+    # not authorize a replacement directory or a worker created after auditing.
+    for worker in selected:
         status = worker.lstat()
-        if status.st_uid != os.getuid() or not stat.S_ISDIR(status.st_mode):
+        if (status.st_uid != os.getuid() or not stat.S_ISDIR(status.st_mode)
+                or (status.st_dev, status.st_ino) != audited_workers[worker]):
             raise ValueError('invalid worker directory')
+    removed = [] if removed_workers is None else removed_workers
+    for worker in selected:
         shutil.rmtree(worker)
-        removed.append(worker.name)
+        removed.append(str(worker))
     return removed
+
+
+def test_host_info(name):
+    """LaunchServices sees the background-only test host before any AppKit startup."""
+    info = plistlib.loads((REPO / 'LiveLingo/Resources/Info.plist').read_bytes())
+    info['LSUIElement'] = True
+    target = OUT / (name + '-host-info.plist')
+    with target.open('x', encoding='utf-8') as output:
+        output.write(plistlib.dumps(info).decode('utf-8'))
+    return target
+
+
+def invocation_name(requested_name):
+    """Choose a fresh evidence stem and reserve it with the exclusive host plist."""
+    suffixes = ('.log', '.json', '.pid', '.xcresult', '-host-info.plist',
+                '-preferences.log', '-check_build_warnings.txt',
+                '-check_test_preferences.txt')
+    occupied = set()
+    for path in OUT.iterdir():
+        for suffix in suffixes:
+            if path.name.endswith(suffix):
+                occupied.add(path.name.removesuffix(suffix))
+        sample = re.fullmatch(r'(.+)-sample-[0-9]+-pid[0-9]+(?:-files)?\.txt', path.name)
+        if sample:
+            occupied.add(sample[1])
+    # A single inventory gives a finite search bound; allow up to 32 extra
+    # attempts for concurrent reservations in a shared evidence root.
+    for attempt in range(1, len(occupied) + 33):
+        name = requested_name if attempt == 1 else f'{requested_name}-{attempt}'
+        if name not in occupied:
+            try:
+                return name, test_host_info(name)
+            except FileExistsError:
+                # Another DerivedData invocation may share this evidence root.
+                pass
+    raise FileExistsError('could not reserve an invocation stem within the bounded attempts')
 
 
 EVIDENCE_TIMEOUT_S = 10
@@ -272,8 +325,10 @@ def main():
             DD / 'Build/Products/Debug/LiveLingo.app'):
         parser.error('the existing Debug host is missing or sandboxed; rebuild with --action test')
     previous_workers = {path.name for path in (DD / 'tmp').glob('worker-*')}
-    log_path = OUT / (args.name + '.log')
-    result_path = OUT / (args.name + '.xcresult')
+    requested_name = args.name
+    name, host_info = invocation_name(requested_name)
+    log_path = OUT / (name + '.log')
+    result_path = OUT / (name + '.xcresult')
     command = ['/usr/bin/xcodebuild', '-project', 'LiveLingo.xcodeproj',
                '-scheme', 'LiveLingo', '-configuration', 'Debug',
                '-destination', 'platform=macOS,arch=arm64',
@@ -283,6 +338,7 @@ def main():
                '-test-timeouts-enabled', 'YES',
                '-default-test-execution-time-allowance', '120',
                '-maximum-test-execution-time-allowance', '180',
+               'LIVELINGO_HOST_INFO_PLIST=' + str(host_info),
                'CODE_SIGNING_ALLOWED=NO']
     # Clean first: warnings appear only for files Xcode compiles, so the warning
     # gate needs a full compile of both targets in this very log.
@@ -302,7 +358,7 @@ def main():
                                    stderr=subprocess.STDOUT, text=True, errors='replace',
                                    start_new_session=True,
                                    env=dict(os.environ, TMPDIR=str(DD / 'tmp')))
-        (OUT / (args.name + '.pid')).write_text(str(process.pid) + '\n')
+        (OUT / (name + '.pid')).write_text(str(process.pid) + '\n')
 
         def consume():
             for line in redact.filtered(process.stdout):
@@ -324,7 +380,7 @@ def main():
             for pid, identity in ids.items():
                 if identity is None or processes().get(pid) != identity:
                     continue
-                target = OUT / f'{args.name}-sample-{len(samples) + 1}-pid{pid}.txt'
+                target = OUT / f'{name}-sample-{len(samples) + 1}-pid{pid}.txt'
                 record = {'reason': reason, 'pid': pid, 'identity': identity,
                           'path': None, 'last_test': state['last_test'], 'exit_code': None}
                 # Diagnostic failures never disable the test deadline, and a
@@ -352,7 +408,7 @@ def main():
                     record['error'] = 'sample evidence already exists'
                 if pid != process.pid:
                     record.update(host_file_evidence(
-                        OUT / f'{args.name}-sample-{len(samples) + 1}-pid{pid}-files.txt', pid))
+                        OUT / f'{name}-sample-{len(samples) + 1}-pid{pid}-files.txt', pid))
                 record['elapsed_s'] = round(time.monotonic() - started, 3)
                 samples.append(record)
 
@@ -388,10 +444,14 @@ def main():
                     except ProcessLookupError:
                         pass
                 break
-            time.sleep(1)
+            # Focused, noninteractive suites can finish in less than a second.
+            # Observe their real host identities before they exit, so cleanup
+            # never falls back to trusting a worker directory's PID alone.
+            time.sleep(0.1)
         returncode = process.wait()
         reader.join(timeout=10)
-    receipt = {'name': args.name, 'parallel': args.parallel, 'workers': args.workers,
+    receipt = {'requested_name': requested_name, 'name': name,
+               'parallel': args.parallel, 'workers': args.workers,
                'action': args.action, 'only': args.only, 'deadline_s': 1800,
                'load_before': load_before, 'load_after': os.getloadavg(), 'wall_s': round(time.monotonic() - started, 3),
                'exit_code': returncode, 'timed_out': timed_out, 'samples': samples,
@@ -405,7 +465,7 @@ def main():
         receipt['trash_added'] = sorted(trash_after - trash_before)
         if receipt['trash_added']:
             print('tests added entries to the user Trash: ' + ', '.join(receipt['trash_added']))
-    (OUT / (args.name + '.json')).write_text(json.dumps(receipt, indent=2) + '\n')
+    (OUT / (name + '.json')).write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps({key: receipt[key] for key in ('name', 'wall_s', 'exit_code', 'timed_out', 'last_test')}), flush=True)
     if timed_out or returncode != 0:
         return 124 if timed_out else returncode
@@ -428,13 +488,15 @@ def main():
             receipt['host_output_source'] = 'xcresult action log testDetails.emittedOutput'
         except (ValueError, OSError, TypeError):
             receipt['host_output_error'] = 'could not read filtered test output from result bundle'
-            (OUT / (args.name + '.json')).write_text(json.dumps(receipt, indent=2) + '\n')
+            (OUT / (name + '.json')).write_text(json.dumps(receipt, indent=2) + '\n')
             print(receipt['host_output_error'])
             return 1
     try:
+        audited_workers = {}
         events, audit_paths = preference_events(DD / 'tmp', set(observed_hosts), previous_workers,
-                                                allow_empty=bool(args.only))
-        verification_log = OUT / (args.name + '-preferences.log')
+                                                allow_empty=bool(args.only),
+                                                audited_workers=audited_workers)
+        verification_log = OUT / (name + '-preferences.log')
         with verification_log.open('x', encoding='utf-8') as log:
             # Preserve the actual Xcode completion marker and failure evidence,
             # and use each worker's audit as the sole preference event source.
@@ -446,7 +508,7 @@ def main():
         receipt['preference_verification_log'] = str(verification_log)
     except (ValueError, OSError):
         receipt['preference_audit_error'] = 'could not verify this invocation preference audit streams'
-        (OUT / (args.name + '.json')).write_text(json.dumps(receipt, indent=2) + '\n')
+        (OUT / (name + '.json')).write_text(json.dumps(receipt, indent=2) + '\n')
         print(receipt['preference_audit_error'])
         return 1
     guards = []
@@ -463,20 +525,21 @@ def main():
                                  cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, errors='replace')
         output = ''.join(redact.filtered(checked.stdout.splitlines(keepends=True)))
-        (OUT / (args.name + '-' + script.removesuffix('.py') + '.txt')).write_text(output)
+        (OUT / (name + '-' + script.removesuffix('.py') + '.txt')).write_text(output)
         guards.append({'guard': script, 'exit_code': checked.returncode})
         print(output.rstrip())
     receipt['guards'] = guards
     passed = all(item['exit_code'] == 0 for item in guards) and not receipt.get('trash_added')
-    # Keep worker directories (fixtures, screenshots) as evidence after a
-    # failure; after a pass their events are already in the verification log.
+    # Keep failed runs in place; remove successful fixtures only after auditing.
     if passed and not args.keep_workers:
+        receipt['removed_workers'] = []
         try:
-            receipt['removed_workers'] = retire_workers(DD / 'tmp', set(observed_hosts), previous_workers)
+            retire_workers(DD / 'tmp', set(observed_hosts), previous_workers, audited_workers,
+                           removed_workers=receipt['removed_workers'])
         except (ValueError, OSError):
             receipt['worker_cleanup_error'] = 'could not remove this invocation worker directories'
             print(receipt['worker_cleanup_error'])
-    (OUT / (args.name + '.json')).write_text(json.dumps(receipt, indent=2) + '\n')
+    (OUT / (name + '.json')).write_text(json.dumps(receipt, indent=2) + '\n')
     return 0 if passed else 1
 
 

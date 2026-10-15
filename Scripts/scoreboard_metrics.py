@@ -42,12 +42,12 @@ _ORDINALS = ("first second third fourth fifth sixth seventh eighth ninth tenth e
              "thirteenth fourteenth fifteenth sixteenth seventeenth eighteenth nineteenth twentieth "
              "twenty-first twenty-second twenty-third twenty-fourth twenty-fifth twenty-sixth "
              "twenty-seventh twenty-eighth twenty-ninth thirtieth thirty-first").split()
-_STATUSES = ("pending", "active", "retryWaiting", "manualPending", "completed", "silent", "failed", "otherLanguage")
+_STATUSES = ("pending", "active", "retryWaiting", "manualPending", "completed", "silent", "failed", "otherLanguage", "noSpeech")
 _PENDING = frozenset(("pending", "active", "retryWaiting", "manualPending"))
 _FAILURES = ("englishGateHanDominant", "englishGateNoLatin", "emptyOutput", "invalidText",
-             "repeatedLoop", "runawayText", "error", "interrupted")
+             "repeatedLoop", "runawayText", "error", "interrupted", "noSpeech")
 _ISSUES = ("transcription_missing", "transcription_non_english", "transcription_retry",
-           "capture_gap", "recording_diagnostic_write_failed")
+           "capture_gap", "recording_diagnostic_write_failed", "transcription_no_speech")
 _TRANSLATION_STATES = ("pending", "translating", "completed", "failed", "unknown")
 _TRANSLATION_FAILURES = ("processExited", "requestTimedOut", "outputLimitReached", "translationRejected",
                          "cancelled", "interrupted", "runtimeUnavailable", "invalidResponse",
@@ -64,7 +64,7 @@ _EVENTS = frozenset(("start", "end", "backend", "first_result", "result", "reque
                      "current_preview", "complete", "complete_adjacent", "complete_after_retry",
                      "rejected", "failed", "adjacent_repair", "adjacent_repair_kept",
                      "retry_ordinary", "retry_content", "retry_outputLimit", "retry_transport",
-                     "retry_standard", "retry_repairContent", "retry_expandedBudget",
+                     "retry_standard", "retry_repairContent", "retry_repairQuotedContent", "retry_expandedBudget",
                      "delivered", "main_hop", "released", "timing", "unknown") + _ISSUES)
 _NUMERIC_FIELDS = frozenset(("elapsed_ms", "duration_ms", "duration_s", "sample_rate", "frames",
                             "fed_seconds", "captured_since_range_end_ms", "since_first_audio_ms",
@@ -1012,12 +1012,17 @@ def durable_census(session_directory):
                 latest[record["id"]] = record
     if previous_sequence < checkpoint:
         raise ValueError("Durable journal shorter than snapshot") from None
-    result = {"available": True, "chunks": len(latest), "by_status": dict.fromkeys(_STATUSES, 0),
-              "seconds_by_status": dict.fromkeys(_STATUSES, 0.0), "other_language": 0,
+    # Optional filter fields appear only when observed: existing metric bytes
+    # and frozen default-path reports remain unchanged for admitted speech.
+    statuses = tuple(value for value in _STATUSES if value != "noSpeech")
+    failures = tuple(value for value in _FAILURES if value != "noSpeech")
+    issues = tuple(value for value in _ISSUES if value != "transcription_no_speech")
+    result = {"available": True, "chunks": len(latest), "by_status": dict.fromkeys(statuses, 0),
+              "seconds_by_status": dict.fromkeys(statuses, 0.0), "other_language": 0,
               "failed": 0, "unresolved": 0, "pending": 0, "completed_with_unresolved": 0,
-              "failure_reasons": dict.fromkeys(_FAILURES + ("unknown",), 0),
+              "failure_reasons": dict.fromkeys(failures + ("unknown",), 0),
               "automatic_retry_attempts": 0, "recovered_by_retry": 0,
-              "issue_events": dict.fromkeys(_ISSUES + ("unknown",), 0),
+              "issue_events": dict.fromkeys(issues + ("unknown",), 0),
               "apple_evidence": dict.fromkeys(("empty", "present", "unknown"), 0),
               "apple_evidence_present": 0, "apple_evidence_present_seconds": 0.0,
               "not_captioned_speech_seconds": 0.0, "snapshot_sequence": checkpoint,
@@ -1028,8 +1033,10 @@ def durable_census(session_directory):
         seconds = record["end"] - record["start"]
         candidate = record.get("candidateText") is not None
         retries = _integer(record.get("automaticRetryCount", 0))
-        result["by_status"][status] += 1
-        result["seconds_by_status"][status] += seconds
+        result["by_status"][status] = result["by_status"].get(status, 0) + 1
+        result["seconds_by_status"][status] = result["seconds_by_status"].get(status, 0.0) + seconds
+        if status == "noSpeech":
+            result["no_speech"] = result.get("no_speech", 0) + int(not candidate)
         result["other_language"] += int(status == "otherLanguage" and not candidate)
         result["failed"] += int(status == "failed")
         result["unresolved"] += int(status in ("failed", "retryWaiting") or candidate)
@@ -1040,7 +1047,7 @@ def durable_census(session_directory):
         reason = record.get("failureReason")
         if reason is not None:
             reason = reason if isinstance(reason, str) and reason in _FAILURES else "unknown"
-            result["failure_reasons"][reason] += 1
+            result["failure_reasons"][reason] = result["failure_reasons"].get(reason, 0) + 1
         evidence = record.get("appleEvidence")
         evidence_class = ("present" if evidence else "empty") if isinstance(evidence, str) else "unknown"
         result["apple_evidence"][evidence_class] += 1
@@ -1054,5 +1061,5 @@ def durable_census(session_directory):
         for issue in parse_ndjson(_read_regular(issues_path)):
             event = issue.get("event")
             event = event if isinstance(event, str) and event in _ISSUES else "unknown"
-            result["issue_events"][event] += 1
+            result["issue_events"][event] = result["issue_events"].get(event, 0) + 1
     return result

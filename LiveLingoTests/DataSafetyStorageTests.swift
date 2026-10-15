@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import XCTest
+import os
 @testable import LiveLingo
 
 enum DataSafetyFixtures {
@@ -32,7 +33,812 @@ private final class RecoveryScanProbe: @unchecked Sendable {
     func finish(_ value: Result<Void, Error>) { lock.withLock { outcome = value } }
 }
 
+private final class SlowIOProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ticks: [UInt64]
+    private var events: [String] = []
+    init(ticks: [UInt64]) { self.ticks = ticks }
+    func now() -> UInt64 { lock.withLock { ticks.removeFirst() } }
+    func record(_ site: SensitiveFileIO.IOCallSite, _ elapsed: UInt64) {
+        lock.withLock { events.append("\(site.rawValue):\(elapsed)") }
+    }
+    var recorded: [String] { lock.withLock { events } }
+}
+
+private final class TraceTextProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+    func record(_ text: String) { lock.withLock { values.append(text) } }
+    var texts: [String] { lock.withLock { values } }
+}
+
 final class DataSafetyStorageTests: XCTestCase {
+    func testDefaultCloudCoordinatorReadsCheckedDescriptorsOutsideStorageScope() throws {
+        let root = try DataSafetyFixtures.make("default-cloud-coordinator"); defer { DataSafetyFixtures.preserve(root) }
+        let file = root.appendingPathComponent("synthetic.json")
+        try SessionArchiveCoding.atomicWrite(Data("SYNTHETIC".utf8), file)
+        let trace = TraceTextProbe()
+        try SensitiveFileIO.$ioBeginObserver.withValue({ site, _ in trace.record(site.rawValue) }) {
+            try SensitiveFileIO.$datalessProbe.withValue({ $0 == file }) {
+                try SensitiveFileIO.$beforeFileRead.withValue({ _ in
+                    XCTAssertFalse(SensitiveFileIO.materializationBlocked)
+                    XCTAssertFalse(SessionStore.isHoldingProcessLock)
+                    XCTAssertNotEqual(getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD), IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+                }) {
+                    try SessionCloudOpenPreparation.Environment.live.coordinateDownload(file, { false })
+                    try SessionCloudOpenPreparation.Environment.live.coordinateDownload(root, { false })
+                }
+            }
+        }
+        XCTAssertEqual(trace.texts.filter { $0 == "cloudCoordinate" }.count, 2)
+        XCTAssertTrue(trace.texts.contains("dataRead"))
+        XCTAssertTrue(trace.texts.contains("directoryScan"))
+        XCTAssertThrowsError(try SessionCloudOpenPreparation.Environment.live.coordinateDownload(file, { true })) { XCTAssertTrue($0 is CancellationError) }
+    }
+
+    func testSignpostUsesTheSameReadableObjectPayloadForBeginAndEnd() {
+        let ticks = SlowIOProbe(ticks: [123, 124]), trace = TraceTextProbe()
+        SensitiveFileIO.$ioClock.withValue({ ticks.now() }) {
+            SensitiveFileIO.$signpostObserver.withValue({ text in trace.record(text); errno = EIO }) {
+                errno = EACCES
+                SensitiveFileIO.timedIO(.entryStatus) {
+                    XCTAssertEqual(trace.texts, ["site=entryStatus start_ns=123"])
+                    XCTAssertEqual(errno, EACCES)
+                    errno = ENOENT
+                }
+                XCTAssertEqual(errno, ENOENT)
+            }
+        }
+        XCTAssertEqual(trace.texts, ["site=entryStatus start_ns=123", "site=entryStatus errno=\(ENOENT)"])
+    }
+
+    func testMaterializationPolicyIsScopedRestoredAndMapsDeniedReads() throws {
+        let prior = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD)
+        XCTAssertGreaterThanOrEqual(prior, 0)
+        XCTAssertThrowsError(try SensitiveFileIO.withoutDatalessMaterialization {
+            XCTAssertTrue(SensitiveFileIO.materializationBlocked)
+            XCTAssertEqual(getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD), IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+            throw SensitiveFileIO.Failure.system(operation: "synthetic denied read", code: EDEADLK)
+        }) { error in guard case .dataless = error as? SensitiveFileIO.Failure else { return XCTFail("Expected deferred materialization") } }
+        XCTAssertFalse(SensitiveFileIO.materializationBlocked)
+        XCTAssertEqual(getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD), prior)
+    }
+
+    func testNestedPrivateIOPreservesCloudDeferralInsteadOfGenericIOFailure() throws {
+        XCTAssertThrowsError(try SensitiveFileIO.withoutDatalessMaterialization {
+            try SessionArchiveCoding.privateIO(at: URL(fileURLWithPath: "/synthetic/metadata")) {
+                throw SensitiveFileIO.Failure.system(operation: "synthetic denied directory open", code: EDEADLK)
+            }
+        }) { error in
+            XCTAssertEqual(LearningFailureCode.code(for: error), "session_storageDeferred")
+            XCTAssertTrue(LearningFailureCode.label(for: LearningFailureCode.code(for: error)).contains("云端"))
+        }
+    }
+
+    func testOutsideStorageScopeCanReadWhileLockedScopeRefusesPlaceholder() throws {
+        let root = try DataSafetyFixtures.make("materialization-scope")
+        defer { DataSafetyFixtures.preserve(root) }
+        let url = root.appendingPathComponent("manifest.json")
+        let data = Data("synthetic local bytes".utf8)
+        try SensitiveFileIO.atomicWrite(data, to: url)
+        try SensitiveFileIO.$datalessProbe.withValue({ $0 == url }) {
+            XCTAssertEqual(try SensitiveFileIO.readIfPresent(at: url), data)
+            XCTAssertThrowsError(try SensitiveFileIO.withoutDatalessMaterialization { try SensitiveFileIO.readIfPresent(at: url) })
+        }
+        XCTAssertEqual(try Data(contentsOf: url), data)
+    }
+
+    func testWriterDirectoryENOENTNeverExecutesAnUnlockedTransaction() throws {
+        let root = try DataSafetyFixtures.make("writer-directory-ENOENT")
+        defer { DataSafetyFixtures.preserve(root) }
+        _ = try SessionStore(directory: root).save(populatedSnapshot())
+        let bytes = try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName))
+        var actions = 0
+        try SessionStore.$directoryOpenError.withValue(ENOENT) {
+            XCTAssertThrowsError(try SessionStore(directory: root).withWriteTransaction { _ in actions += 1 }) { error in
+                guard case .io(_, ENOENT) = error as? SessionStoreError else { return XCTFail("Writer must report the missing binding") }
+            }
+            XCTAssertNil(try SessionStore(directory: root).loadDetailedWithoutRecovery().snapshot)
+        }
+        XCTAssertEqual(actions, 0)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName)), bytes)
+    }
+
+    func testLegacyCloudManifestDefersBeforeLocksAndKeepsFrenchSummarySelection() throws {
+        let root = try DataSafetyFixtures.make("legacy-cloud-manifest")
+        defer { DataSafetyFixtures.preserve(root) }
+        try Data(#"{"targetLocale":"fr"}"#.utf8).write(to: root.appendingPathComponent("manifest.json"))
+        let summary = "Résumé synthétique original."
+        try Data(summary.utf8).write(to: root.appendingPathComponent("summary-fr.md"))
+        let probe = RecoveryScanProbe()
+        try SensitiveFileIO.$datalessProbe.withValue({ $0.lastPathComponent == "manifest.json" }) {
+            try SensitiveFileIO.$ioBeginObserver.withValue({ site, _ in
+                if [.storeDirectoryLock, .storeProcessLock, .storeLease].contains(site) { probe.record(root) }
+            }) {
+                for writer in [false, true] {
+                    let operation: () throws -> Void = {
+                        if writer { try SessionStore(directory: root).withWriteTransaction { _ in () } }
+                        else { _ = try SessionStore(directory: root).loadDetailedWithoutRecovery() }
+                    }
+                    XCTAssertThrowsError(try operation()) { error in
+                            guard case .storageDeferred = error as? SessionStoreError else { return XCTFail("Legacy placeholder must stay deferred") }
+                        }
+                }
+            }
+        }
+        XCTAssertTrue(probe.names.isEmpty, "Legacy manifest preflight precedes all storage locks")
+        let loaded = try XCTUnwrap(SessionStore(directory: root).loadDetailedWithoutRecovery().snapshot)
+        XCTAssertEqual(loaded.targetLocale, "fr")
+        XCTAssertEqual(loaded.legacyMarkdown, summary)
+        XCTAssertEqual(try SessionExporter.savedSummaryURL(in: root, targetLocale: nil).lastPathComponent, "summary-fr.md")
+    }
+
+    func testImmutableLegacyExportIndexAndMembersUseNonmaterializingReads() throws {
+        let root = try DataSafetyFixtures.make("legacy-export-cloud-index")
+        defer { DataSafetyFixtures.preserve(root) }
+        let generation = UUID().uuidString
+        let version = root.appendingPathComponent(".exports/versions/" + generation, isDirectory: true)
+        try FileManager.default.createDirectory(at: version, withIntermediateDirectories: true)
+        let manifest = Data(#"{"targetLocale":"fr"}"#.utf8), summary = Data("Résumé conservé.".utf8)
+        try manifest.write(to: version.appendingPathComponent("manifest.json"))
+        try summary.write(to: version.appendingPathComponent("summary-fr.md"))
+        let index = try JSONSerialization.data(withJSONObject: ["version": 1,
+            "members": ["manifest.json": SessionArchiveCoding.digest(manifest), "summary-fr.md": SessionArchiveCoding.digest(summary)]])
+        try index.write(to: version.appendingPathComponent("export-index.json"))
+        try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent(".exports/current").path,
+                                                   withDestinationPath: "versions/" + generation)
+        for name in ["export-index.json", "manifest.json", "summary-fr.md"] {
+            try SensitiveFileIO.$datalessProbe.withValue({ $0.lastPathComponent == name }) {
+                XCTAssertThrowsError(try SessionStore(directory: root).loadDetailedWithoutRecovery()) { error in
+                    guard case .storageDeferred = error as? SessionStoreError else { return XCTFail("Export placeholder must stay deferred") }
+                }
+            }
+        }
+        XCTAssertEqual(try SessionStore(directory: root).loadDetailedWithoutRecovery().snapshot?.legacyMarkdown, "Résumé conservé.")
+        let (alias, _) = try committedAlias(in: version, named: "export-index.json")
+        try SensitiveFileIO.$beforeTemporaryInspection.withValue({ _ in XCTAssertFalse(SessionStore.isHoldingProcessLock) }) {
+            XCTAssertEqual(try SessionStore(directory: root).loadDetailedWithoutRecovery().snapshot?.legacyMarkdown, "Résumé conservé.")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+    }
+
+    @MainActor
+    func testReviewQueueStartupAutomaticallyRepairsItsCommittedJournalAlias() async throws {
+        let root = try DataSafetyFixtures.make("review-startup-alias")
+        defer { DataSafetyFixtures.preserve(root) }
+        let url = root.appendingPathComponent("learning-review-queue.json")
+        let journal = LearningReviewQueue.Journal(jobs: [], userPaused: true, version: 4)
+        let bytes = try await LearningReviewStorage(journalURL: url, expectedBytes: nil).save(journal, sequence: 1)
+        let (alias, _) = try committedAlias(in: root, named: url.lastPathComponent)
+        let queue = SensitiveFileIO.$beforeTemporaryInspection.withValue({ _ in
+            XCTAssertFalse(SessionStore.isHoldingProcessLock)
+            XCTAssertTrue(LearningReviewStorage.processLockIsAvailableForTesting())
+        }) {
+            LearningReviewQueue(journalURL: url, observeSleep: false, diagnostics: .disabled,
+                generate: { _, _, _, _, _ in throw CancellationError() })
+        }
+        XCTAssertNil(queue.currentFailure)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+        XCTAssertEqual(try Data(contentsOf: url), bytes)
+        var book = LearningNotebook()
+        let segment = TranscriptSegment(startTime: 0, endTime: 2, english: "Synthetic queue recovery.", chinese: "合成队列恢复。")
+        try book.append(evidence: [segment], note: LearningNote(topic: "合成恢复", points: [.init(kind: "核心结论", text: "合成进度保留。")]))
+        let course = root.appendingPathComponent("course", isDirectory: true)
+        var snapshot = SessionSnapshot(segments: [segment]); book.writeState(to: &snapshot)
+        _ = try SessionStore(directory: course).save(snapshot)
+        try queue.enqueue(directory: course, notebook: book)
+        try await queue.waitForPendingStorage()
+        XCTAssertEqual(queue.items.count, 1)
+        XCTAssertNil(queue.currentFailure)
+        await queue.shutdownForTesting()
+    }
+    private func syntheticReport(in root: URL) throws -> ReviewReportEntry {
+        let entry = ReviewReportEntry(jobID: UUID(), identity: nil, scope: .wholeLesson,
+            inputDigest: nil, completed: 0, total: 0, supersededByRevision: nil,
+            updatedAt: Date(timeIntervalSince1970: 0), fileName: "summary-review.md", markdown: "SYNTHETIC_REPORT_BODY")
+        try ReviewReportCollection.save(entry, in: root)
+        return entry
+    }
+
+    func testReportAndIndexAliasRecoveryIsTargetedOutsideStorageLocksAndKeepsBytes() throws {
+        for name in ["summary-review.md", ReviewReportCollection.manifestFileName] {
+            let root = try DataSafetyFixtures.make("report-targeted-alias"); defer { DataSafetyFixtures.preserve(root) }
+            let entry = try syntheticReport(in: root)
+            let (alias, bytes) = try committedAlias(in: root, named: name)
+            let unrelated = root.appendingPathComponent(".sensitive-write-\(UUID()).tmp")
+            try interruptedWrite(Data("SYNTHETIC_UNCOMMITTED_BODY".utf8), to: root.appendingPathComponent("unrelated.json"), orphan: unrelated)
+            let trace = TraceTextProbe()
+            let reports = try SensitiveFileIO.$beforeTemporaryInspection.withValue({ _ in
+                XCTAssertFalse(SessionStore.isHoldingProcessLock)
+                XCTAssertTrue(LearningReviewStorage.processLockIsAvailableForTesting())
+                trace.record("inspection")
+            }) {
+                try SensitiveFileIO.withoutDatalessMaterialization { try ReviewReportCollection.read(in: root) }
+            }
+            XCTAssertEqual(reports.first?.markdown, entry.markdown)
+            XCTAssertFalse(trace.texts.isEmpty)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(name)), bytes)
+            XCTAssertEqual(try Data(contentsOf: unrelated), Data("SYNTHETIC_UNCOMMITTED_BODY".utf8))
+        }
+    }
+
+    func testBusyReportAliasRecoveryRemainsRetryableAndKeepsBothNames() throws {
+        let root = try DataSafetyFixtures.make("report-busy-alias"); defer { DataSafetyFixtures.preserve(root) }
+        _ = try syntheticReport(in: root)
+        let name = ReviewReportCollection.manifestFileName
+        let (alias, bytes) = try committedAlias(in: root, named: name)
+        let lease = Darwin.open(alias.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW)
+        XCTAssertGreaterThanOrEqual(lease, 0)
+        guard lease >= 0 else { return }
+        defer { _ = Darwin.close(lease) }
+        XCTAssertEqual(flock(lease, LOCK_EX | LOCK_NB), 0)
+        let trace = TraceTextProbe()
+        try SensitiveFileIO.$recoveryRetryObserver.withValue({ trace.record("busy") }) {
+            XCTAssertThrowsError(try SensitiveFileIO.withoutDatalessMaterialization { try ReviewReportCollection.read(in: root) }) {
+                XCTAssertEqual(LearningFailureCode.code(for: $0), "session_storageBusy")
+                XCTAssertTrue(ReviewFailure.classify($0, defaultStage: .output).isStorageDeferred)
+            }
+        }
+        XCTAssertEqual(trace.texts.count, SensitiveFileIO.recoveryRetryLimit)
+        XCTAssertEqual(try Data(contentsOf: alias), bytes)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(name)), bytes)
+        XCTAssertEqual(flock(lease, LOCK_UN), 0)
+        XCTAssertNoThrow(try SensitiveFileIO.withoutDatalessMaterialization { try ReviewReportCollection.read(in: root) })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+    }
+
+    func testReportRecoveryNeverAcceptsUnprovenHardLinks() throws {
+        let root = try DataSafetyFixtures.make("report-unproven-alias"); defer { DataSafetyFixtures.preserve(root) }
+        _ = try syntheticReport(in: root)
+        let destination = root.appendingPathComponent("summary-review.md")
+        let bytes = try Data(contentsOf: destination)
+        let alias = root.appendingPathComponent(".sensitive-write-\(UUID()).tmp")
+        XCTAssertEqual(Darwin.link(destination.path, alias.path), 0)
+        XCTAssertThrowsError(try ReviewReportCollection.read(in: root)) {
+            XCTAssertEqual(LearningFailureCode.code(for: $0), "report_unreadable")
+        }
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+        XCTAssertEqual(try Data(contentsOf: alias), bytes)
+    }
+
+    private static let killProbeState = OSAllocatedUnfairLock(initialState: Optional<URL>.none)
+
+    private func recoveryKillProbe() throws -> URL {
+        try Self.killProbeState.withLock { cached in
+            if let executable = cached { return executable }
+            let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            let root = try DataSafetyFixtures.make("kill-probe-build")
+            let executable = root.appendingPathComponent("storage-recovery-kill-probe")
+            let log = root.appendingPathComponent("build.log")
+            _ = FileManager.default.createFile(atPath: log.path, contents: nil)
+            let output = try FileHandle(forWritingTo: log)
+            defer { try? output.close() }
+            let compiler = Process()
+            compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            compiler.arguments = ["swiftc", "-D", "DEBUG", "-parse-as-library",
+                source.appendingPathComponent("LiveLingo/Sources/SensitiveFileIO.swift").path,
+                source.appendingPathComponent("Scripts/storage-recovery-kill-probe.swift").path,
+                "-o", executable.path]
+            compiler.standardOutput = output; compiler.standardError = output
+            try compiler.run(); compiler.waitUntilExit()
+            guard compiler.terminationStatus == 0 else { throw SessionStoreError.invalidState("Synthetic crash probe failed to compile") }
+            let verify = Process()
+            verify.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+            verify.arguments = ["--verify", "--strict", executable.path]
+            verify.standardOutput = output; verify.standardError = output
+            try verify.run(); verify.waitUntilExit()
+            guard verify.terminationStatus == 0 else { throw SessionStoreError.invalidState("Synthetic crash probe signature is invalid") }
+            cached = executable
+            return executable
+        }
+    }
+    private func populatedSnapshot() -> SessionSnapshot {
+        let id = UUID()
+        let segment = TranscriptSegment(startTime: 1, endTime: 3,
+            english: "Synthetic committed evidence survives interrupted publication.",
+            chinese: "合成的已提交正文在发布中断后仍须完整。", sessionID: id)
+        return SessionSnapshot(sessionID: id, segments: [segment])
+    }
+
+    /// Model a kill after publication of the first-write hard link. The
+    /// previous committed file is retained, never overwritten by the fixture.
+    private func committedAlias(in root: URL, named name: String) throws -> (URL, Data) {
+        let destination = root.appendingPathComponent(name)
+        let bytes = try Data(contentsOf: destination)
+        try FileManager.default.moveItem(at: destination, to: root.appendingPathComponent("before-interruption-" + name))
+        let orphan = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        try interruptedWrite(bytes, to: destination, orphan: orphan)
+        guard link(orphan.path, destination.path) == 0 else {
+            throw SessionStoreError.io(operation: "publish synthetic committed alias", code: errno)
+        }
+        return (orphan, bytes)
+    }
+
+    func testSlowIODiagnosticsOnlyEmitAboveThresholdAndPreserveErrno() {
+        let threshold = SensitiveFileIO.slowIOThresholdNanoseconds
+        let probe = SlowIOProbe(ticks: [0, threshold - 1, 0, threshold, 0, threshold + 1])
+        SensitiveFileIO.$ioClock.withValue({ probe.now() }) {
+            SensitiveFileIO.$slowIOObserver.withValue({ site, elapsed in
+                probe.record(site, elapsed)
+                errno = EIO
+            }) {
+                for _ in 0..<3 {
+                    let result = SensitiveFileIO.timedIO(.temporaryOpen) { errno = EACCES; return Int32(-1) }
+                    XCTAssertEqual(result, -1)
+                    XCTAssertEqual(errno, EACCES, "Diagnostics must preserve the syscall failure")
+                }
+            }
+        }
+        XCTAssertEqual(probe.recorded, ["temporaryOpen:\(threshold + 1)"], "One fixed label and elapsed duration only")
+    }
+
+    func testSlowIODiagnosticsAlsoMeasureThrowingCalls() throws {
+        let elapsed = SensitiveFileIO.slowIOThresholdNanoseconds + 1
+        let probe = SlowIOProbe(ticks: [0, elapsed])
+        try SensitiveFileIO.$ioClock.withValue({ probe.now() }) {
+            try SensitiveFileIO.$slowIOObserver.withValue({ probe.record($0, $1) }) {
+                XCTAssertThrowsError(try SensitiveFileIO.timedIO(.temporaryRead) {
+                    throw SessionStoreError.io(operation: "synthetic read failure", code: EIO)
+                })
+            }
+        }
+        XCTAssertEqual(probe.recorded, ["temporaryRead:\(elapsed)"])
+    }
+
+    func testIOBeginRecordPrecedesCallAndPreservesIncomingErrno() {
+        let probe = SlowIOProbe(ticks: [123, 124])
+        SensitiveFileIO.$ioClock.withValue({ probe.now() }) {
+            SensitiveFileIO.$ioBeginObserver.withValue({ site, start in
+                probe.record(site, start)
+                errno = EIO
+            }) {
+                errno = EACCES
+                SensitiveFileIO.timedIO(.dataRead) {
+                    XCTAssertEqual(probe.recorded, ["dataRead:123"], "A nonreturning call must already have a begin record")
+                    XCTAssertEqual(errno, EACCES)
+                }
+            }
+        }
+    }
+
+    func testBeginDiagnosticsCoverStoreReadsWritesSyncPublicationAndLocks() throws {
+        let root = try DataSafetyFixtures.make("begin-diagnostic-coverage")
+        defer { DataSafetyFixtures.preserve(root) }
+        let events = RecoveryScanProbe()
+        try SensitiveFileIO.$ioBeginObserver.withValue({ site, _ in
+            events.record(URL(fileURLWithPath: "/" + site.rawValue))
+        }) {
+            let store = SessionStore(directory: root)
+            let stored = try store.save(populatedSnapshot())
+            _ = try store.loadDetailedWithoutRecovery()
+            _ = try store.save(stored)
+        }
+        let actual = Set(events.names)
+        let required: [SensitiveFileIO.IOCallSite] = [.dataRead, .dataWrite, .fileSync, .directorySync,
+            .fileLink, .fileRename, .storeLease, .storeProcessLock, .storeDirectoryLock]
+        for site in required {
+            XCTAssertTrue(actual.contains(site.rawValue), "Missing begin diagnostic for \(site.rawValue)")
+        }
+    }
+
+    func testSnapshotSwapBetweenMetadataAndOpenRejectsNewInodeAndFIFO() throws {
+        for fifo in [false, true] {
+            let root = try DataSafetyFixtures.make(fifo ? "snapshot-fifo-race" : "snapshot-inode-race")
+            defer { DataSafetyFixtures.preserve(root) }
+            _ = try SessionStore(directory: root).save(populatedSnapshot())
+            let target = root.appendingPathComponent(SessionStore.snapshotFileName)
+            let backup = root.appendingPathComponent("original-snapshot")
+            let original = try Data(contentsOf: target)
+            let states = RecoveryScanProbe(), reads = RecoveryScanProbe()
+            try SensitiveFileIO.$ioBeginObserver.withValue({ site, _ in
+                if site == .storeLease { states.record(root) }
+                if site == .fileOpen, states.names.count == 1 {
+                    states.record(root)
+                    XCTAssertEqual(Darwin.rename(target.path, backup.path), 0)
+                    if fifo { XCTAssertEqual(mkfifo(target.path, 0o600), 0) }
+                    else {
+                        do { try Data("synthetic replacement".utf8).write(to: target) }
+                        catch { XCTFail("Cannot stage synthetic replacement") }
+                    }
+                }
+            }) {
+                try SensitiveFileIO.$beforeFileRead.withValue({ reads.record($0) }) {
+                    XCTAssertThrowsError(try SessionStore(directory: root).loadDetailedWithoutRecovery()) { error in
+                        guard case .unsafePath = error as? SessionStoreError else { return XCTFail("Expected a rejected identity/type race") }
+                    }
+                }
+            }
+            XCTAssertEqual(states.names.count, 2, "Race injection must reach the snapshot open")
+            XCTAssertTrue(reads.names.isEmpty, "Unverified replacement bytes must never be read")
+            XCTAssertEqual(try Data(contentsOf: backup), original)
+        }
+    }
+
+    func testDatalessSnapshotAndJournalAreDeferredBeforeTakingLocksOrReading() throws {
+        let root = try DataSafetyFixtures.make("dataless-preflight")
+        defer { DataSafetyFixtures.preserve(root) }
+        _ = try SessionStore(directory: root).save(populatedSnapshot())
+        let before = try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName))
+        for name in [SessionStore.snapshotFileName, SessionStore.journalFileName] {
+            let probe = RecoveryScanProbe()
+            try SensitiveFileIO.$datalessProbe.withValue({ url in
+                XCTAssertFalse(SessionStore.isHoldingProcessLock)
+                return url.lastPathComponent == name
+            }) {
+                try SensitiveFileIO.$ioBeginObserver.withValue({ site, _ in
+                    if [.dataRead, .storeDirectoryLock, .storeProcessLock, .storeLease].contains(site) {
+                        probe.record(URL(fileURLWithPath: "/" + site.rawValue))
+                    }
+                }) {
+                    XCTAssertThrowsError(try SessionStore(directory: root).loadDetailedWithoutRecovery()) { error in
+                        guard case .storageDeferred(let reason) = error as? SessionStoreError else {
+                            return XCTFail("Expected a readable deferred-storage error")
+                        }
+                        XCTAssertTrue(reason.contains("尚未下载"))
+                    }
+                    XCTAssertThrowsError(try SessionStore(directory: root).save(SessionSnapshot()))
+                }
+            }
+            XCTAssertTrue(probe.names.isEmpty)
+        }
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName)), before)
+    }
+
+    func testSlowReviewReadHoldsCourseLockButNeverGlobalWriterLock() throws {
+        let root = try DataSafetyFixtures.make("slow-review-read")
+        let other = try DataSafetyFixtures.make("slow-review-independent-writer")
+        defer { DataSafetyFixtures.preserve(root); DataSafetyFixtures.preserve(other) }
+        let stored = try SessionStore(directory: root).save(populatedSnapshot())
+        let otherStored = try SessionStore(directory: other).save(populatedSnapshot())
+        let reached = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let readDone = DispatchSemaphore(value: 0), sameDone = DispatchSemaphore(value: 0), otherDone = DispatchSemaphore(value: 0)
+        let reader = RecoveryScanProbe(), same = RecoveryScanProbe(), independent = RecoveryScanProbe()
+        DispatchQueue.global().async {
+            reader.finish(Result {
+                try SensitiveFileIO.$beforeFileRead.withValue({ url in
+                    guard url.lastPathComponent == SessionStore.snapshotFileName else { return }
+                    XCTAssertFalse(SessionStore.isHoldingProcessLock)
+                    reached.signal()
+                    _ = release.wait(timeout: .now() + 15)
+                }) {
+                    let loaded = try SessionStore(directory: root).loadDetailedWithoutRecovery().snapshot
+                    XCTAssertEqual(loaded, stored)
+                }
+            })
+            readDone.signal()
+        }
+        XCTAssertEqual(reached.wait(timeout: .now() + 5), .success)
+        DispatchQueue.global().async {
+            same.finish(Result { _ = try SessionStore(directory: root).save(stored) })
+            sameDone.signal()
+        }
+        DispatchQueue.global().async {
+            independent.finish(Result { _ = try SessionStore(directory: other).save(otherStored) })
+            otherDone.signal()
+        }
+        let independentResult = otherDone.wait(timeout: .now() + 5)
+        XCTAssertEqual(sameDone.wait(timeout: .now() + 0.1), .timedOut, "Same-course writes must wait for the consistent read")
+        release.signal()
+        XCTAssertEqual(readDone.wait(timeout: .now() + 5), .success)
+        XCTAssertEqual(sameDone.wait(timeout: .now() + 5), .success)
+        if independentResult != .success { _ = otherDone.wait(timeout: .now() + 5) }
+        XCTAssertEqual(independentResult, .success, "Slow old-course reads cannot block active-course saves")
+        for probe in [reader, same, independent] { XCTAssertNoThrow(try XCTUnwrap(probe.result).get()) }
+    }
+
+    func testWaitingForAnotherInstancesStoreLeaseDoesNotHoldGlobalWriterLock() throws {
+        let root = try DataSafetyFixtures.make("external-store-lease")
+        let other = try DataSafetyFixtures.make("external-lease-independent")
+        defer { DataSafetyFixtures.preserve(root); DataSafetyFixtures.preserve(other) }
+        let stored = try SessionStore(directory: root).save(populatedSnapshot())
+        let otherStored = try SessionStore(directory: other).save(populatedSnapshot())
+        let fd = Darwin.open(root.appendingPathComponent(".session-store.lock").path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        guard fd >= 0 else { return }
+        defer { _ = Darwin.close(fd) }
+        XCTAssertEqual(flock(fd, LOCK_EX | LOCK_NB), 0)
+        let reached = DispatchSemaphore(value: 0), done = DispatchSemaphore(value: 0), otherDone = DispatchSemaphore(value: 0)
+        let blocked = RecoveryScanProbe(), independent = RecoveryScanProbe()
+        DispatchQueue.global().async {
+            blocked.finish(Result {
+                try SensitiveFileIO.$ioBeginObserver.withValue({ site, _ in
+                    if site == .storeLease {
+                        XCTAssertFalse(SessionStore.isHoldingProcessLock)
+                        reached.signal()
+                    }
+                }) { _ = try SessionStore(directory: root).save(stored) }
+            })
+            done.signal()
+        }
+        XCTAssertEqual(reached.wait(timeout: .now() + 5), .success)
+        DispatchQueue.global().async {
+            independent.finish(Result { _ = try SessionStore(directory: other).save(otherStored) })
+            otherDone.signal()
+        }
+        let result = otherDone.wait(timeout: .now() + 5)
+        _ = flock(fd, LOCK_UN)
+        XCTAssertEqual(done.wait(timeout: .now() + 5), .success)
+        if result != .success { _ = otherDone.wait(timeout: .now() + 5) }
+        XCTAssertEqual(result, .success)
+        for probe in [blocked, independent] { XCTAssertNoThrow(try XCTUnwrap(probe.result).get()) }
+    }
+
+    func testConcurrentSameCourseAliasRepairRetriesBusyLeaseAndRunsWriteOnce() throws {
+        let root = try DataSafetyFixtures.make("concurrent-alias-repair")
+        defer { DataSafetyFixtures.preserve(root) }
+        let stored = try SessionStore(directory: root).save(populatedSnapshot())
+        let (alias, _) = try committedAlias(in: root, named: SessionStore.snapshotFileName)
+        let leased = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0), retried = DispatchSemaphore(value: 0)
+        let firstDone = DispatchSemaphore(value: 0), secondDone = DispatchSemaphore(value: 0)
+        let first = RecoveryScanProbe(), second = RecoveryScanProbe(), transactions = RecoveryScanProbe()
+        DispatchQueue.global().async {
+            first.finish(Result {
+                try SensitiveFileIO.$afterRecoveryLease.withValue({
+                    leased.signal()
+                    _ = release.wait(timeout: .now() + 15)
+                }) { _ = try SessionStore(directory: root).loadDetailedWithoutRecovery() }
+            })
+            firstDone.signal()
+        }
+        XCTAssertEqual(leased.wait(timeout: .now() + 5), .success)
+        DispatchQueue.global().async {
+            second.finish(Result {
+                try SensitiveFileIO.$recoveryRetryObserver.withValue({ retried.signal() }) {
+                    try SessionStore(directory: root).withWriteTransaction { transaction in
+                        transactions.record(root)
+                        _ = try transaction.save(stored)
+                    }
+                }
+            })
+            secondDone.signal()
+        }
+        let observedRetry = retried.wait(timeout: .now() + 5)
+        release.signal()
+        XCTAssertEqual(observedRetry, .success, "The busy lease must be retried, not reported as unsafePath")
+        XCTAssertEqual(firstDone.wait(timeout: .now() + 5), .success)
+        XCTAssertEqual(secondDone.wait(timeout: .now() + 5), .success)
+        for probe in [first, second] { XCTAssertNoThrow(try XCTUnwrap(probe.result).get()) }
+        XCTAssertEqual(transactions.names.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+        XCTAssertEqual(try SessionStore(directory: root).load()?.segments, stored.segments)
+    }
+
+    func testBusyAliasRetryHasLimitAndDoesNotRunTransaction() throws {
+        let root = try DataSafetyFixtures.make("bounded-alias-retry")
+        defer { DataSafetyFixtures.preserve(root) }
+        _ = try SessionStore(directory: root).save(populatedSnapshot())
+        let (alias, bytes) = try committedAlias(in: root, named: SessionStore.snapshotFileName)
+        let fd = Darwin.open(alias.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard fd >= 0 else { return XCTFail("Cannot bind synthetic alias") }
+        defer { _ = flock(fd, LOCK_UN); _ = Darwin.close(fd) }
+        XCTAssertEqual(flock(fd, LOCK_EX | LOCK_NB), 0)
+        let retries = RecoveryScanProbe()
+        try SensitiveFileIO.$recoveryRetryObserver.withValue({ retries.record(root) }) {
+            XCTAssertThrowsError(try SessionStore(directory: root).withWriteTransaction { _ in
+                XCTFail("No transaction may run before recovery succeeds")
+            }) { error in
+                guard case .storageDeferred = error as? SessionStoreError else { return XCTFail("Expected deferred storage") }
+            }
+        }
+        XCTAssertEqual(retries.names.count, SensitiveFileIO.recoveryRetryLimit)
+        XCTAssertEqual(try Data(contentsOf: alias), bytes)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName)), bytes)
+    }
+
+    func testInterruptedRecoveryAfterUnlinkPreservesReceiptAndCommittedBytes() throws {
+        let root = try DataSafetyFixtures.make("interruption-after-unlink")
+        defer { DataSafetyFixtures.preserve(root) }
+        let stored = try SessionStore(directory: root).save(populatedSnapshot())
+        let (alias, bytes) = try committedAlias(in: root, named: SessionStore.snapshotFileName)
+        let destination = root.appendingPathComponent(SessionStore.snapshotFileName)
+        try SensitiveFileIO.$afterAliasUnlink.withValue({ throw SessionStoreError.io(operation: "synthetic termination", code: EIO) }) {
+            XCTAssertThrowsError(try SensitiveFileIO.recoverCommittedFileIfNeeded(at: destination))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+        XCTAssertGreaterThan(getxattr(destination.path, "com.jianhongli.LiveLingo.temporary-v1", nil, 0, 0, XATTR_NOFOLLOW), 0,
+                             "The simulated termination occurs before receipt removal and directory fsync")
+        XCTAssertEqual(try SessionStore(directory: root).loadDetailedWithoutRecovery().snapshot, stored)
+    }
+
+    func testInterruptedRecoveryBeforeRelockDoesNotRunOrReplayTransaction() throws {
+        let root = try DataSafetyFixtures.make("interruption-before-relock")
+        defer { DataSafetyFixtures.preserve(root) }
+        let stored = try SessionStore(directory: root).save(populatedSnapshot())
+        let (alias, bytes) = try committedAlias(in: root, named: SessionStore.snapshotFileName)
+        let store = SessionStore(directory: root)
+        try SessionStore.$afterAliasRecovery.withValue({
+            XCTAssertFalse(SessionStore.isHoldingProcessLock)
+            throw SessionStoreError.io(operation: "synthetic termination before relock", code: EIO)
+        }) {
+            XCTAssertThrowsError(try store.withWriteTransaction { _ in XCTFail("Interrupted before transaction") })
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName)), bytes)
+        var transactions = 0
+        try store.withWriteTransaction { transaction in
+            transactions += 1
+            _ = try transaction.save(stored)
+        }
+        XCTAssertEqual(transactions, 1)
+    }
+
+    func testSIGKILLAfterAliasUnlinkAndBeforeRelockPreservesCommittedCourse() throws {
+        let executable = try recoveryKillProbe()
+        for stage in ["after-unlink", "before-relock"] {
+            let root = try DataSafetyFixtures.make("sigkill-" + stage)
+            defer { DataSafetyFixtures.preserve(root) }
+            let stored = try SessionStore(directory: root).save(populatedSnapshot())
+            let (alias, bytes) = try committedAlias(in: root, named: SessionStore.snapshotFileName)
+            let destination = root.appendingPathComponent(SessionStore.snapshotFileName)
+            let child = Process()
+            child.executableURL = executable
+            child.arguments = [stage, destination.path]
+            child.standardOutput = FileHandle.nullDevice; child.standardError = FileHandle.nullDevice
+            try child.run(); child.waitUntilExit()
+            XCTAssertEqual(child.terminationReason, .uncaughtSignal)
+            XCTAssertEqual(child.terminationStatus, SIGKILL, "Only the synthetic helper is killed; no crash dialog is generated")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+            XCTAssertEqual(try Data(contentsOf: destination), bytes)
+            let receiptLength = getxattr(destination.path, "com.jianhongli.LiveLingo.temporary-v1", nil, 0, 0, XATTR_NOFOLLOW)
+            if stage == "after-unlink" { XCTAssertGreaterThan(receiptLength, 0) }
+            else { XCTAssertEqual(receiptLength, -1); XCTAssertEqual(errno, ENOATTR) }
+            XCTAssertEqual(try SessionStore(directory: root).loadDetailedWithoutRecovery().snapshot, stored)
+            XCTAssertNoThrow(try SessionStore(directory: root).save(stored))
+        }
+    }
+
+    func testReviewJournalAliasRepairRunsOutsideBothReviewLocks() async throws {
+        let root = try DataSafetyFixtures.make("review-journal-alias")
+        defer { DataSafetyFixtures.preserve(root) }
+        let url = root.appendingPathComponent("review.json")
+        let journal = LearningReviewQueue.Journal(jobs: [], userPaused: true, version: 4)
+        let initial = try await LearningReviewStorage(journalURL: url, expectedBytes: nil).save(journal, sequence: 1)
+        let (alias, _) = try committedAlias(in: root, named: url.lastPathComponent)
+        let probe = RecoveryScanProbe()
+        let result = try await SensitiveFileIO.$beforeTemporaryInspection.withValue({ pending in
+            probe.record(pending)
+            XCTAssertTrue(LearningReviewStorage.processLockIsAvailableForTesting())
+            let fd = Darwin.open(url.appendingPathExtension("lock").path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            if fd >= 0 {
+                XCTAssertEqual(flock(fd, LOCK_EX | LOCK_NB), 0)
+                _ = flock(fd, LOCK_UN); _ = Darwin.close(fd)
+            } else { XCTFail("Missing synthetic review lock") }
+        }) { try await LearningReviewStorage(journalURL: url, expectedBytes: initial).save(journal, sequence: 1) }
+        XCTAssertEqual(result, initial)
+        XCTAssertEqual(probe.names, [alias.lastPathComponent])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+        // Alias recovery does not bypass the expected-bytes compare-and-swap.
+        do {
+            _ = try await LearningReviewStorage(journalURL: url, expectedBytes: Data()).save(journal, sequence: 1)
+            XCTFail("A stale review writer must still be rejected")
+        } catch ReviewIdentityError.conflict { }
+    }
+
+    func testDU05SaveRepairsCommittedAliasesOutsideLocksAndRunsTransactionOnce() throws {
+        let root = try DataSafetyFixtures.make("DU05-save-alias")
+        defer { DataSafetyFixtures.preserve(root) }
+        let store = SessionStore(directory: root)
+        let stored = try store.save(populatedSnapshot())
+        let (snapshotAlias, original) = try committedAlias(in: root, named: SessionStore.snapshotFileName)
+        let (lockAlias, _) = try committedAlias(in: root, named: ".session-store.lock")
+        let probe = RecoveryScanProbe()
+        var transactions = 0
+        let saved = try SensitiveFileIO.$beforeTemporaryInspection.withValue({ url in
+            probe.record(url)
+            XCTAssertFalse(SessionStore.isHoldingProcessLock, "A temporary alias must never be opened under the process lock")
+            let fd = Darwin.open(root.appendingPathComponent(".session-store.lock").path,
+                                 O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+            XCTAssertGreaterThanOrEqual(fd, 0)
+            if fd >= 0 {
+                XCTAssertEqual(flock(fd, LOCK_EX | LOCK_NB), 0, "Recovery must also run outside the disk lock")
+                _ = flock(fd, LOCK_UN)
+                _ = Darwin.close(fd)
+            }
+        }) {
+            try store.withWriteTransaction { transaction in
+                transactions += 1
+                XCTAssertTrue(SessionStore.isHoldingProcessLock)
+                return try transaction.save(stored)
+            }
+        }
+        XCTAssertEqual(transactions, 1, "Recovery retries must not replay an accepted transaction")
+        XCTAssertEqual(Set(probe.names), Set([snapshotAlias.lastPathComponent, lockAlias.lastPathComponent]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: snapshotAlias.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lockAlias.path))
+        XCTAssertEqual(try SessionStore(directory: root).load(), saved)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("before-interruption-" + SessionStore.snapshotFileName)), original)
+        XCTAssertEqual(saved.sessionID, stored.sessionID)
+        XCTAssertEqual(saved.segments, stored.segments)
+    }
+
+    func testDU05StalledCommittedAliasRecoveryDoesNotBlockAnotherCourseSave() throws {
+        let root = try DataSafetyFixtures.make("DU05-stalled-save-alias")
+        let other = try DataSafetyFixtures.make("DU05-independent-course")
+        defer { DataSafetyFixtures.preserve(root); DataSafetyFixtures.preserve(other) }
+        let stored = try SessionStore(directory: root).save(populatedSnapshot())
+        let otherStored = try SessionStore(directory: other).save(populatedSnapshot())
+        let (alias, bytes) = try committedAlias(in: root, named: SessionStore.snapshotFileName)
+        let reached = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let done = DispatchSemaphore(value: 0), otherDone = DispatchSemaphore(value: 0)
+        let probe = RecoveryScanProbe(), otherProbe = RecoveryScanProbe()
+        DispatchQueue.global().async {
+            probe.finish(Result {
+                try SensitiveFileIO.$beforeTemporaryInspection.withValue({ url in
+                    probe.record(url)
+                    XCTAssertFalse(SessionStore.isHoldingProcessLock)
+                    reached.signal()
+                    _ = release.wait(timeout: .now() + 30)
+                }) { _ = try SessionStore(directory: root).save(stored) }
+            })
+            done.signal()
+        }
+        XCTAssertEqual(reached.wait(timeout: .now() + 10), .success)
+        // The interrupted publication was already complete before any recovery.
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName)), bytes)
+        DispatchQueue.global().async {
+            otherProbe.finish(Result { _ = try SessionStore(directory: other).save(otherStored) })
+            otherDone.signal()
+        }
+        let independentSave = otherDone.wait(timeout: .now() + 10)
+        release.signal()
+        XCTAssertEqual(done.wait(timeout: .now() + 30), .success)
+        if independentSave != .success { XCTAssertEqual(otherDone.wait(timeout: .now() + 30), .success) }
+        XCTAssertEqual(independentSave, .success, "A stalled alias open must not hold the global save lock")
+        XCTAssertNoThrow(try XCTUnwrap(probe.result).get())
+        XCTAssertNoThrow(try XCTUnwrap(otherProbe.result).get())
+        XCTAssertEqual(probe.names, [alias.lastPathComponent])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+        let reopened = try XCTUnwrap(SessionStore(directory: root).load())
+        XCTAssertEqual(reopened.sessionID, stored.sessionID)
+        XCTAssertEqual(reopened.segments, stored.segments)
+    }
+
+    func testDU05FailedAliasRepairKeepsCommittedBytesAndDoesNotRunTransaction() throws {
+        let root = try DataSafetyFixtures.make("DU05-rejected-save-alias")
+        defer { DataSafetyFixtures.preserve(root) }
+        let store = SessionStore(directory: root)
+        _ = try store.save(SessionSnapshot())
+        let destination = root.appendingPathComponent(SessionStore.snapshotFileName)
+        let bytes = try Data(contentsOf: destination)
+        let alias = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        XCTAssertEqual(link(destination.path, alias.path), 0)
+        let probe = RecoveryScanProbe()
+        var transactions = 0
+        XCTAssertThrowsError(try SensitiveFileIO.$beforeTemporaryInspection.withValue({ url in
+            probe.record(url)
+            XCTAssertFalse(SessionStore.isHoldingProcessLock)
+        }) {
+            try store.withWriteTransaction { _ in transactions += 1 }
+        })
+        XCTAssertEqual(transactions, 0)
+        XCTAssertEqual(probe.names, [alias.lastPathComponent], "An unproven alias gets one bounded inspection")
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+        XCTAssertEqual(try Data(contentsOf: alias), bytes)
+    }
+
+    func testDU05TighteningNeverRecoversButExplicitUnlockedPreparationDoes() throws {
+        let root = try DataSafetyFixtures.make("DU05-explicit-alias-preparation")
+        defer { DataSafetyFixtures.preserve(root) }
+        _ = try SessionStore(directory: root).save(SessionSnapshot())
+        let destination = root.appendingPathComponent(SessionStore.snapshotFileName)
+        let (alias, bytes) = try committedAlias(in: root, named: SessionStore.snapshotFileName)
+        let probe = RecoveryScanProbe()
+        try SensitiveFileIO.$beforeTemporaryInspection.withValue({ probe.record($0) }) {
+            XCTAssertThrowsError(try SensitiveFileIO.tightenFileIfPresent(destination))
+        }
+        XCTAssertEqual(probe.names, [], "Validation must not implicitly open a temporary alias")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: alias.path))
+        try SensitiveFileIO.$beforeTemporaryInspection.withValue({ probe.record($0) }) {
+            try SensitiveFileIO.recoverCommittedFileIfNeeded(at: destination)
+        }
+        XCTAssertEqual(probe.names, [alias.lastPathComponent])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+        XCTAssertNoThrow(try SensitiveFileIO.tightenFileIfPresent(destination))
+    }
+
     private func interruptedWrite(_ bytes: Data, to destination: URL, orphan: URL) throws {
         XCTAssertThrowsError(try SensitiveFileIO.$beforeTemporaryCommit.withValue({ pending in
             guard Darwin.rename(pending.path, orphan.path) == 0 else {

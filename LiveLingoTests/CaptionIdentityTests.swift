@@ -1177,7 +1177,7 @@ final class CaptionIdentityTests: XCTestCase {
             }, adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() }))
             model.receiveCaptionForTesting(source, start: 0, end: 8)
             await model.translationTaskForTesting?.value
-            XCTAssertEqual(attempts, [.standard, .repairContent])
+            XCTAssertEqual(attempts, [.standard, .repairQuotedContent])
             XCTAssertEqual(model.segments[0].english, source)
             XCTAssertEqual(model.segments[0].chinese, recoverySucceeds ? translation : "")
             XCTAssertEqual(model.segments[0].hasUsableTranslation, recoverySucceeds)
@@ -1226,7 +1226,7 @@ final class CaptionIdentityTests: XCTestCase {
         XCTAssertTrue(model.segments[0].chinese.isEmpty)
         gate.finish(.success(reply))
         await model.translationTaskForTesting?.value
-        XCTAssertEqual(attempts, [.standard, .repairContent])
+        XCTAssertEqual(attempts, [.standard, .repairQuotedContent])
         XCTAssertEqual(model.segments[0].chinese, translation)
         XCTAssertTrue(model.segments[0].hasUsableTranslation)
     }

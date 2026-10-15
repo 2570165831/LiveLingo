@@ -98,6 +98,38 @@ struct ClassroomLegacyPrimaryButtonStyle: ButtonStyle {
     }
 }
 
+/// A solid graphite selection remains readable while another app owns focus.
+/// Drawing the fill explicitly also avoids Sonoma's pale native toggle bezel.
+struct ClassroomFollowLatestToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button { configuration.isOn.toggle() } label: { configuration.label }
+            .buttonStyle(ClassroomFollowLatestButtonStyle(selected: configuration.isOn))
+            .accessibilityValue(configuration.isOn ? "开" : "关")
+            .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
+    }
+}
+
+private struct ClassroomFollowLatestButtonStyle: ButtonStyle {
+    let selected: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11))
+            .foregroundStyle(selected ? ClassroomPalette.onAccent : Color.primary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(selected ? ClassroomPalette.accent : Color(nsColor: .controlBackgroundColor),
+                        in: RoundedRectangle(cornerRadius: 6))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(ClassroomPalette.accentOutline.opacity(selected ? 0.6 : 0.25), lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.45)
+    }
+}
+
 #if DEBUG
 /// Counts work in isolated view tests; no classroom text is collected.
 @MainActor
@@ -107,6 +139,7 @@ enum SummaryRenderingDiagnostics {
         var summaryBodies = 0
         var lineSplits = 0
         var inlineParses = 0
+        var liveInlineParses = 0
         var reviewDifferences = 0
         var reviewTokenizations = 0
         var previewBodies = 0
@@ -138,8 +171,11 @@ enum SummaryRenderingDiagnostics {
 #endif
 
 struct ContentView: View {
+    #if DEBUG
+    private var followBindingsForTesting: (@MainActor (Binding<UUID?>, Binding<Bool>) -> Void)?
+    #endif
     @EnvironmentObject private var model: AppModel
-    @ObservedObject private var floatingWindow = FloatingSubtitleWindowController.shared
+    @ObservedObject private var floatingWindow: FloatingSubtitleWindowController
     @AppStorage("transcriptTextSize") private var transcriptTextSize = 18.0
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     private var readingSize: Double { 18 * ReadingTypography.scale(textSize: transcriptTextSize, dynamicType: dynamicTypeSize) }
@@ -150,6 +186,7 @@ struct ContentView: View {
     @State private var compactPane: ReadingPane = .subtitles
     @State private var followLatest = true
     @State private var captionAnchor: UUID?
+    @State private var lastObservedCaptionID: UUID?
     @State private var showStatusDetails = false
     @State private var showSummaryDetails = false
     @State private var showingReviewQueueManager = false
@@ -174,17 +211,40 @@ struct ContentView: View {
         }
     }
 
-    init(showWholeLessonNotes: Bool = false) {
+    init(showWholeLessonNotes: Bool = false, floatingWindow: FloatingSubtitleWindowController = .shared) {
+        _floatingWindow = ObservedObject(wrappedValue: floatingWindow)
         _wholeLessonNotes = State(initialValue: showWholeLessonNotes)
         _compactPane = State(initialValue: showWholeLessonNotes ? .notes : .subtitles)
     }
+
+    #if DEBUG
+    init(followBindingsForTesting: @escaping @MainActor (Binding<UUID?>, Binding<Bool>) -> Void,
+         showWholeLessonNotes: Bool = false) {
+        self.init(showWholeLessonNotes: showWholeLessonNotes)
+        self.followBindingsForTesting = followBindingsForTesting
+    }
+    #endif
 
     var body: some View {
         #if DEBUG
         let _ = SummaryRenderingDiagnostics.record(\.rootBodies)
         #endif
         VStack(spacing: 0) {
+            if let alarm = model.alarmBanner {
+                AlarmBanner(state: alarm, dismiss: model.dismissAlarmReminder)
+            }
             recordingStrip
+            if let status = model.archiveCloudDownloadStatus {
+                HStack(spacing: 12) {
+                    ProgressView().controlSize(.small)
+                    Text(status).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("取消等待") { model.cancelCloudCourseOpen() }
+                        .accessibilityIdentifier("cloud-course-cancel")
+                }
+                .padding(12)
+                .accessibilityIdentifier("cloud-course-download-status")
+            }
             workspace
             statusBar
         }
@@ -209,6 +269,19 @@ struct ContentView: View {
         .environment(\.classroomReadingScale, readingSize / 18)
         .modifier(ApplePreviewTranslationHost())
         .classroomTint(ClassroomPalette.accent)
+        #if DEBUG
+        .onAppear {
+            if AppRuntimeEnvironment.isUnitTesting { followBindingsForTesting?($captionAnchor, $followLatest) }
+        }
+        #endif
+        .onReceive(model.$segments) { segments in
+            // Published emits before the property's setter completes. Read the
+            // incoming value, and retain the request even when layout is deferred.
+            let latestID = segments.last?.id
+            guard latestID != lastObservedCaptionID else { return }
+            lastObservedCaptionID = latestID
+            if followLatest { captionAnchor = latestID }
+        }
     }
 
     /// The window title names the current lesson; the app name stays in the menu bar.
@@ -228,19 +301,25 @@ struct ContentView: View {
         ToolbarItem(placement: .primaryAction) { moreMenu }
         ToolbarItem(placement: .primaryAction) {
             HStack(spacing: 8) {
-                Button {
-                    floatingWindow.show(model: model)
-                } label: {
-                    Label("浮动字幕", systemImage: "pip")
+                Toggle(isOn: Binding(get: { floatingWindow.isVisible }, set: { visible in
+                    if visible { floatingWindow.show(model: model) } else { floatingWindow.hide() }
+                })) {
+                    Label("悬浮字幕", systemImage: "pip")
                 }
-                .help("打开浮动字幕")
+                .toggleStyle(.button)
+                .labelStyle(.iconOnly)
+                .help("显示/隐藏悬浮字幕（⇧⌘F）")
                 .accessibilityIdentifier("classroom-floating-subtitles")
-                Button { floatingWindow.toggleLock() } label: {
-                    Label(floatingWindow.lockActionTitle,
+                Toggle(isOn: Binding(get: { floatingWindow.isLocked }, set: { locked in
+                    if locked != floatingWindow.isLocked { floatingWindow.toggleLock() }
+                })) {
+                    Label("锁定悬浮字幕",
                           systemImage: floatingWindow.isLocked ? "lock.fill" : "lock.open")
                 }
+                .toggleStyle(.button)
                 .labelStyle(.iconOnly)
-                .help(floatingWindow.lockActionTitle + "（⌘⇧L）；锁定后点击穿过字幕窗")
+                .help(floatingWindow.lockActionTitle + "（⇧⌘L）；锁定后点击穿过字幕窗")
+                .accessibilityLabel("锁定悬浮字幕")
                 .accessibilityIdentifier("classroom-floating-lock")
             }
         }
@@ -251,7 +330,7 @@ struct ContentView: View {
                 Label(model.isPaused ? "继续" : "暂停",
                       systemImage: model.isPaused ? "play.fill" : "pause.fill")
             }
-            .disabled(!model.hasActiveSession)
+            .disabled(!model.canPauseRecording)
             .help(model.isPaused ? "继续录音" : "暂停录音")
             .accessibilityIdentifier("classroom-pause-resume")
         }
@@ -303,7 +382,7 @@ struct ContentView: View {
                 Label(model.isManualTranslating ? "文字翻译中…" : "文字翻译…", systemImage: "character.bubble")
             }
             .accessibilityIdentifier("classroom-typed-translation")
-            ReadingSizePicker(size: $transcriptTextSize, title: "字幕字号")
+            ReadingSizePicker(size: $transcriptTextSize, title: "阅读字号")
                 .accessibilityIdentifier("classroom-caption-size")
             Divider()
             if !model.isLiveOnly {
@@ -448,11 +527,17 @@ struct ContentView: View {
                     .foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize()
                 Toggle("跟随最新", isOn: $followLatest)
-                    .toggleStyle(.button)
+                    .toggleStyle(ClassroomFollowLatestToggleStyle())
                     .controlSize(.small)
-                    .classroomTint(.gray)
                     .help("关闭后可阅读先前字幕，新内容不会自动滚动到顶部")
                     .accessibilityIdentifier("classroom-follow-latest")
+                    #if DEBUG
+                    .background {
+                        if AppRuntimeEnvironment.isUnitTesting {
+                            CaptionFrameProbe(identifier: "classroom-follow-control").allowsHitTesting(false)
+                        }
+                    }
+                    #endif
             }
             .padding(16)
 
@@ -468,29 +553,27 @@ struct ContentView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(model.segments.reversed()) { segment in
+                CaptionHistoryScrollView(latestID: model.segments.last?.id, followLatest: followLatest,
+                                         captionAnchor: $captionAnchor,
+                                         readLatestID: { model.segments.last?.id }) {
+                    LazyVStack(spacing: 0) {
+                        ForEach(model.segments.reversed()) { segment in
+                            VStack(spacing: 0) {
                                 segmentRow(segment)
-                                    .id(segment.id)
                                 Divider()
-                                    .padding(.leading, 84)
+                                    #if DEBUG
+                                    .background {
+                                        if AppRuntimeEnvironment.isUnitTesting {
+                                            CaptionFrameProbe(identifier: "classroom-divider-\(segment.id)")
+                                        }
+                                    }
+                                    #endif
+                                    .padding(.leading, 16 + 54 * readingSize / 18 + 14)
                             }
-                        }
-                        .scrollTargetLayout()
-                    }
-                    .scrollPosition(id: $captionAnchor, anchor: .top)
-                    .onChange(of: model.segments.count) {
-                        if followLatest, let latest = model.segments.last {
-                            proxy.scrollTo(latest.id, anchor: .top)
+                            .id(segment.id)
                         }
                     }
-                    .onChange(of: followLatest) {
-                        if followLatest, let latest = model.segments.last {
-                            proxy.scrollTo(latest.id, anchor: .top)
-                        }
-                    }
+                    .scrollTargetLayout()
                 }
             }
         }
@@ -498,9 +581,12 @@ struct ContentView: View {
     }
 
     private func segmentRow(_ segment: TranscriptSegment) -> some View {
-        TranscriptCaptionRow(segment: segment, textSize: readingSize, stream: model.finalCaptionStream,
-                             target: model.captionDisplayLanguage, converter: model.chineseScriptConverter)
-            .equatable()
+        ChineseRecognitionCaptionRow(segment: segment, textSize: readingSize, stream: model.finalCaptionStream,
+            target: model.captionDisplayLanguage, converter: model.chineseScriptConverter,
+            state: model.chineseRecognitionState, availability: { model.chineseRecognitionAvailability(for: segment) },
+            recognize: { model.recognizeCaptionAsChinese(segment.id) },
+            cancel: { model.cancelChineseRecognition(segment.id) },
+            undo: { model.undoChineseRecognition(segment.id) })
     }
 
     private var summaryPanel: some View {
@@ -518,8 +604,10 @@ struct ContentView: View {
                 Spacer()
                 Button { showSummaryDetails = true } label: {
                     Image(systemName: "info.circle")
+                        .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.borderless)
+                .foregroundStyle(.primary)
                 .accessibilityLabel("查看笔记整理状态")
                 .help("查看完整的整理进度与导出结果")
                 .popover(isPresented: $showSummaryDetails) {
@@ -607,9 +695,12 @@ struct ContentView: View {
                         model.exportScope = wholeLessonNotes ? .wholeLesson : .latest
                         showExportOptions.toggle()
                     } label: {
-                        Label("导出", systemImage: "square.and.arrow.up")
+                        Label { Text("导出") } icon: {
+                            Image(systemName: "square.and.arrow.up").foregroundStyle(.secondary)
+                        }
                     }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .disabled(model.segments.isEmpty || model.isExporting)
                     .help("导出 Markdown、纯文本、Word 或 PDF")
                     .accessibilityIdentifier("classroom-export-notes")
@@ -618,9 +709,12 @@ struct ContentView: View {
                     Button {
                         model.requestSummaryRefresh()
                     } label: {
-                        Label("更新", systemImage: "arrow.clockwise")
+                        Label { Text("更新") } icon: {
+                            Image(systemName: "arrow.clockwise").foregroundStyle(.secondary)
+                        }
                     }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .disabled(model.segments.isEmpty)
                     .help(model.legacyProvenanceUnavailable ? "旧课程需先在“录音处理”中重建笔记"
                         : model.savedProcessingIsPaused ? "处理已暂停：在“录音处理”中继续后可更新笔记"
@@ -662,17 +756,20 @@ struct ContentView: View {
             if !model.translationReady {
                 Button("重新检查模型") { model.retryRuntimePreparation() }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
             }
             Button("状态详情") { showStatusDetails = true }
                 .buttonStyle(.borderless)
+                .foregroundStyle(.primary)
                 .accessibilityIdentifier("classroom-status-details")
                 .popover(isPresented: $showStatusDetails, arrowEdge: .top) { statusDetails.protectFullScreenPopover() }
             Group {
                 if let notice = model.sessionNotice, notice == model.errorMessage {
                     Button(action: model.dismissSessionNotice) {
-                        Image(systemName: "xmark").frame(width: 24, height: 24)
+                        Image(systemName: "xmark").foregroundStyle(.secondary).frame(width: 24, height: 24)
                     }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .help("关闭这条提示")
                     .accessibilityLabel("关闭这条提示")
                 } else {
@@ -774,6 +871,77 @@ struct ContentView: View {
     }
 }
 
+/// Keep the requested row in the same state SwiftUI uses to preserve history.
+/// A one-shot proxy scroll can be superseded by that old row during a deferred
+/// lazy-stack layout, especially while the classroom window is inactive.
+struct CaptionHistoryScrollView<Rows: View>: View {
+    let latestID: UUID?
+    let followLatest: Bool
+    @Binding var captionAnchor: UUID?
+    let rows: () -> Rows
+    private let readLatestID: (@MainActor () -> UUID?)?
+    @Environment(\.controlActiveState) private var controlActiveState
+    @Environment(\.scenePhase) private var scenePhase
+
+    init(latestID: UUID?, followLatest: Bool, captionAnchor: Binding<UUID?>,
+         readLatestID: (@MainActor () -> UUID?)? = nil,
+         @ViewBuilder rows: @escaping () -> Rows) {
+        self.latestID = latestID
+        self.followLatest = followLatest
+        self._captionAnchor = captionAnchor
+        self.readLatestID = readLatestID
+        self.rows = rows
+    }
+
+    var body: some View {
+        ScrollView { rows() }
+            .scrollPosition(id: $captionAnchor, anchor: .top)
+            .background(CaptionFollowWindowFocusObserver(onBecomeKey: followIfEnabled)
+                .frame(width: 0, height: 0).accessibilityHidden(true))
+            .onChange(of: latestID) { followIfEnabled() }
+            .onChange(of: followLatest) { followIfEnabled() }
+            .onChange(of: controlActiveState) {
+                if controlActiveState == .key { followIfEnabled() }
+            }
+            .onChange(of: scenePhase) {
+                if scenePhase == .active { followIfEnabled() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                followIfEnabled()
+            }
+    }
+
+    private func followIfEnabled() {
+        guard followLatest else { return }
+        // Do not change the toggle on a manual scroll. Reading history while
+        // follow is on still lasts until the next caption or focus restoration.
+        captionAnchor = readLatestID.map { $0() } ?? latestID
+    }
+}
+
+private struct CaptionFollowWindowFocusObserver: NSViewRepresentable {
+    let onBecomeKey: @MainActor () -> Void
+    func makeNSView(context: Context) -> CaptionFollowFocusView { CaptionFollowFocusView() }
+    func updateNSView(_ view: CaptionFollowFocusView, context: Context) { view.onBecomeKey = onBecomeKey }
+}
+
+private final class CaptionFollowFocusView: NSView {
+    var onBecomeKey: (@MainActor () -> Void)?
+    private var keySubscription: AnyCancellable?
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        keySubscription = nil
+        guard let window else { return }
+        keySubscription = NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
+            .filter { [weak window] notification in
+                guard let window else { return false }
+                return notification.object as? NSWindow === window
+            }
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.onBecomeKey?() }
+    }
+}
+
 #if DEBUG
 /// Measures an actual rendered row in the isolated test host. Release builds
 /// contain neither the probe nor synthetic presentation data.
@@ -805,6 +973,7 @@ private struct ReviewEntryButton: View {
             }
         }
         .buttonStyle(.borderless)
+        .foregroundStyle(.primary)
         .help("选择本课复查范围，或管理历史复查任务")
         .accessibilityIdentifier("classroom-review-notes")
     }
@@ -818,33 +987,60 @@ struct NotesExportOptions: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("导出课堂笔记").font(.headline).accessibilityAddTraits(.isHeader)
 
-            Picker("格式", selection: $model.exportFormat) {
-                ForEach(NotesExportFormat.allCases) { format in
-                    Text(format.title).tag(format)
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
+                GridRow {
+                    Text("格式")
+                    Picker("格式", selection: $model.exportFormat) {
+                        ForEach(NotesExportFormat.allCases) { format in
+                            Text(format.title).tag(format)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 236, alignment: .leading)
+                    .accessibilityIdentifier("notes-export-format")
+                }
+                GridRow {
+                    Text(NotesExportDisclosure.scopeTitle)
+                    Picker(NotesExportDisclosure.scopeTitle, selection: $model.exportScope) {
+                        ForEach(NotesExportScope.allCases) { scope in
+                            Text(scope.title).tag(scope)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 236, alignment: .leading)
+                    .accessibilityIdentifier("notes-export-scope")
+                }
+                GridRow {
+                    Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                    Text(model.exportScope == .wholeLesson ? model.summaryCoverageStatus : model.latestSummaryScope)
+                        .font(.caption2)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
+                }
+                GridRow {
+                    Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 0) {
+                            Toggle(model.outputLanguage == .english ? ClassroomFixedText.exportTranscriptToggle.text(targetCode: "en") : "附带双语字幕与时间戳（按所选范围）", isOn: $model.exportIncludesTranscript)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .accessibilityIdentifier("notes-export-transcript")
+                            Spacer(minLength: 0)
+                        }
+                        HStack(spacing: 0) {
+                            Toggle("附带核对意见（独立章节）", isOn: $model.exportIncludesReviewAdvice)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .accessibilityHint(NotesExportDisclosure.reviewHelp)
+                                .help(NotesExportDisclosure.reviewHelp)
+                                .accessibilityIdentifier("notes-export-review")
+                            Spacer(minLength: 0)
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .frame(width: 236, alignment: .leading)
                 }
             }
-            .pickerStyle(.segmented)
-
-            Picker(NotesExportDisclosure.scopeTitle, selection: $model.exportScope) {
-                ForEach(NotesExportScope.allCases) { scope in
-                    Text(scope.title).tag(scope)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            Text(model.exportScope == .wholeLesson ? model.summaryCoverageStatus : model.latestSummaryScope)
-                .font(.caption2)
-                .foregroundStyle(ReadingAccessibility.secondaryText)
-
-            Toggle(model.outputLanguage == .english ? ClassroomFixedText.exportTranscriptToggle.text(targetCode: "en") : "附带双语字幕与时间戳（按所选范围）", isOn: $model.exportIncludesTranscript)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-            Toggle("附带核对意见（独立章节）", isOn: $model.exportIncludesReviewAdvice)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .accessibilityHint(NotesExportDisclosure.reviewHelp)
-                .help(NotesExportDisclosure.reviewHelp)
-                .accessibilityIdentifier("notes-export-review")
             Text(NotesExportDisclosure.reviewHelp)
                 .font(.caption2)
                 .foregroundStyle(ReadingAccessibility.secondaryText)
@@ -877,6 +1073,7 @@ struct ClassroomSettingsView: View {
     private var subtitles = FloatingSubtitlePreferences()
     @AppStorage("transcriptTextSize") private var readingTextSize = 18.0
     var fullScreenMode: FullScreenClassModeController? = nil
+    private let subtitleControlWidth: CGFloat = 272
 
     var body: some View {
         Form {
@@ -902,6 +1099,17 @@ struct ClassroomSettingsView: View {
                     Button("选择保存位置…") { Task { await model.chooseOutputDirectory() } }
                         .disabled(model.phase.isBusy)
                 }
+            }
+            Section("提醒") {
+                Toggle("录音时检测警报声并提醒", isOn: $model.alarmDetectionEnabled)
+                Text(AlarmPolicy.explanation).font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("警报时自动保存本节并另开新录音", isOn: $model.alarmAutomaticSaveEnabled)
+                    .disabled(!model.alarmDetectionEnabled)
+                Text("检测到持续警报后倒计时 \(AlarmPolicy.countdownSeconds) 秒，可取消；保存模式会在同一位置开始带有“\(AlarmPolicy.postAlarmFolderSuffix)”后缀的新录音。暂停时取消倒计时，实时暂存模式只提醒。字幕窗可见时不发系统通知；隐藏时才发，首次需要时由系统询问通知权限。字幕窗或 LiveLingo 获得键盘焦点时可按 Esc 取消提醒。")
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let notice = model.alarmDetectionNotice { Text(notice).font(.callout) }
             }
             Section("字幕与处理") {
                 if model.showsOutputLanguageSelector {
@@ -942,18 +1150,35 @@ struct ClassroomSettingsView: View {
             }
             Section("阅读字号") {
                 ReadingSizePicker(size: $readingTextSize)
+                    .labelStyle(.titleOnly)
                 Text("同时放大字幕、笔记、时间戳和公式；悬浮字幕在独立字号基础上缩放。")
                     .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section("悬浮字幕") {
-                Picker("显示模式", selection: subtitles.displayModeBinding) {
-                    ForEach(FloatingSubtitleDisplayMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+                Toggle("开始记录时自动显示悬浮字幕", isOn: subtitles.showsOnRecordStartBinding)
+                    .accessibilityIdentifier("floating-show-on-record")
+                LabeledContent("显示模式") {
+                    Picker("显示模式", selection: subtitles.displayModeBinding) {
+                        ForEach(FloatingSubtitleDisplayMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
                     }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: subtitleControlWidth, alignment: .leading)
+                    .accessibilityIdentifier("floating-display-mode")
                 }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("floating-display-mode")
+                Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let fullScreenMode {
+                    SubtitleUnlockHint(controller: fullScreenMode)
+                } else {
+                    Text("可在主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。")
+                        .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if !model.previewTranslationEnabled || !model.supportsPreviewTranslation {
                     Text("“仅中文译文”在译文可用前显示原文。")
                         .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
@@ -966,19 +1191,17 @@ struct ClassroomSettingsView: View {
                                label: "\(Int(subtitles.translationTextSize)) pt")
                 subtitleSlider("背景不透明度", value: subtitles.backgroundOpacityBinding,
                                range: FloatingSubtitlePreferences.opacityRange, step: 0.05,
-                               label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%")
-                Toggle("在所有桌面显示", isOn: subtitles.showsAcrossSpacesBinding)
-                    .accessibilityIdentifier("floating-all-spaces")
+                               label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%", keyboardStepping: true)
+                if let fullScreenMode {
+                    SubtitleSpacesToggle(controller: fullScreenMode, selection: subtitles.showsAcrossSpacesBinding)
+                } else {
+                    Toggle("在所有桌面显示", isOn: subtitles.showsAcrossSpacesBinding)
+                        .accessibilityIdentifier("floating-all-spaces")
+                }
                 Text("在所有普通桌面（含切换桌面时）保持显示。全屏网课模式开启时，字幕会强制加入所有桌面；关闭后恢复此开关的设置。")
                     .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 FullScreenClassModeSettings(controller: fullScreenMode)
-                Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
-                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("锁定后点击会穿过字幕窗；可在主窗口或“录音”菜单解锁（⌘⇧L，仅 App 在前台时有效）。全屏网课模式下也可用顶部菜单栏图标解锁。每次启动默认未锁定。")
-                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             Section("笔记整理") {
                 Picker("每次整理的内容量", selection: $model.noteBatchCharacters) {
@@ -998,17 +1221,47 @@ struct ClassroomSettingsView: View {
     }
 
     private func subtitleSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>,
-                                step: Double, label: String) -> some View {
+                                step: Double, label: String, keyboardStepping: Bool = false) -> some View {
         LabeledContent(title) {
             HStack {
-                Slider(value: value, in: range, step: step)
+                Slider(value: Binding(get: { value.wrappedValue },
+                                      set: { value.wrappedValue = ($0 / step).rounded() * step }), in: range)
                     .accessibilityLabel(title)
                     .accessibilityValue(label)
                     .accessibilityIdentifier("floating-\(title)")
+                    .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { press in
+                        guard keyboardStepping, press.modifiers.intersection([.shift, .control, .option, .command]).isEmpty
+                        else { return .ignored }
+                        let increment = press.key == .rightArrow || press.key == .upArrow
+                        value.wrappedValue = min(range.upperBound, max(range.lowerBound,
+                            value.wrappedValue + (increment ? step : -step)))
+                        return .handled
+                    }
                 Text(label).monospacedDigit().foregroundStyle(ReadingAccessibility.secondaryText).frame(width: 48, alignment: .trailing)
                     .accessibilityHidden(true)
             }
+            .frame(width: subtitleControlWidth)
         }
+    }
+}
+
+private struct SubtitleUnlockHint: View {
+    @ObservedObject var controller: FullScreenClassModeController
+    var body: some View {
+        Text("可在\(controller.subtitleUnlockControls)解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。")
+            .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct SubtitleSpacesToggle: View {
+    @ObservedObject var controller: FullScreenClassModeController
+    let selection: Binding<Bool>
+    var body: some View {
+        Toggle("在所有桌面显示", isOn: controller.isEnabled ? .constant(true) : selection)
+            .disabled(controller.isEnabled)
+            .help(controller.isEnabled ? "全屏网课模式已强制在所有桌面显示；关闭后恢复原设置。" : "在所有普通桌面保持显示")
+            .accessibilityIdentifier("floating-all-spaces")
     }
 }
 
@@ -1016,8 +1269,8 @@ struct ClassroomSettingsView: View {
 
 extension AppModel {
     var canToggleRecording: Bool { hasActiveSession || (canStart && !phase.isBusy) }
-    var canOpenLesson: Bool { !(phase.isBusy || archiveLoading || isImportingFile) }
-    var canImportMedia: Bool { !phase.isBusy && translationReady && !isImportingFile }
+    var canOpenLesson: Bool { !sessionSwitchBlocked && !isImportingFile }
+    var canImportMedia: Bool { !sessionSwitchBlocked && translationReady && !isImportingFile }
     var stopRecordingTitle: String { isLiveOnly ? "结束记录" : "结束并保存" }
 
     func toggleRecording() { hasActiveSession ? stop() : start() }
@@ -1060,7 +1313,7 @@ struct RecordingMenuItems: View {
                 .disabled(!model.canToggleRecording)
             Button(model.isPaused ? "继续" : "暂停") { model.togglePause() }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
-                .disabled(!model.hasActiveSession)
+                .disabled(!model.canPauseRecording)
             Divider()
             if model.isImportingFile {
                 Button("停止导入") { model.cancelMediaImport() }
@@ -1071,13 +1324,26 @@ struct RecordingMenuItems: View {
                     .disabled(!model.canImportMedia)
             }
             Divider()
-            Button("浮动字幕") { floatingWindow.show(model: model) }
+            Toggle("显示悬浮字幕", isOn: Binding(get: { floatingWindow.isVisible }, set: { visible in
+                if visible { floatingWindow.show(model: model) } else { floatingWindow.hide() }
+            }))
                 .keyboardShortcut("f", modifiers: [.command, .shift])
-            Button(floatingWindow.lockActionTitle) { floatingWindow.toggleLock() }
+            Toggle("锁定悬浮字幕", isOn: Binding(get: { floatingWindow.isLocked }, set: { locked in
+                if locked != floatingWindow.isLocked { floatingWindow.toggleLock() }
+            }))
                 .keyboardShortcut("l", modifiers: [.command, .shift])
-            Button("浮动字幕移到屏幕底部") {
+            Button("悬浮字幕移到屏幕底部") {
                 floatingWindow.moveToScreenBottom()
                 floatingWindow.show(model: model)
+            }
+            Button("悬浮字幕移到屏幕顶部") {
+                floatingWindow.moveToScreenTop()
+                floatingWindow.show(model: model)
+            }
+            Picker("悬浮字幕显示", selection: FloatingSubtitlePreferences().displayModeBinding) {
+                ForEach(FloatingSubtitleDisplayMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
             }
         }
     }
@@ -1125,6 +1391,7 @@ struct TypedTranslationView: View {
                 Spacer()
                 Button("快捷键") { showingKeyboardShortcuts.toggle() }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .controlSize(.small)
                     .font(.caption2)
                     .help("查看全部翻译快捷键")
@@ -1406,7 +1673,7 @@ struct LearningReviewControls: View {
                         Image(systemName: "chevron.down").imageScale(.small)
                     }
                     .font(.caption.weight(.regular))
-                    .foregroundStyle(ReadingAccessibility.secondaryText)
+                    .foregroundStyle(.primary)
                 }
                 // The plain button style draws the label as written, matching
                 // 管理队列…; the borderless menu style ignores label fonts.
@@ -1422,9 +1689,10 @@ struct LearningReviewControls: View {
                 // hidden behind the history disclosure or tied to the current recording.
                 Button("管理队列…") { showingQueueManager = true }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .controlSize(.small)
                     .font(.caption.weight(.regular))
-                    .foregroundStyle(ReadingAccessibility.secondaryText)
+                    .foregroundStyle(.primary)
                     .help("查看复查任务、重试失败项、调整顺序或重新定位录音文件夹；任何操作都不会删除文件")
             }
 
@@ -1502,10 +1770,12 @@ struct LearningReviewControls: View {
                   HStack {
                     Button(queue.userPaused ? "开始复查" : queue.actionTitle) { queue.performPrimaryAction() }
                         .buttonStyle(.borderless)
+                        .foregroundStyle(.primary)
                         .font(.caption)
                     if queue.canRemoveFailedJob {
                         Button("移出复查队列") { removalTarget = queue.failedRemovalTarget }
                             .buttonStyle(.borderless)
+                            .foregroundStyle(.primary)
                             .font(.caption)
                     }
                   }
@@ -1652,14 +1922,22 @@ struct LearningReviewControls: View {
         let isLast = queue.items.last?.id == id
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: active ? "waveform" : "clock")
+                Image(systemName: failure != nil ? "exclamationmark.triangle.fill" : active ? "waveform" : "clock")
                     .font(.caption)
-                    .foregroundStyle(active ? Color.cyan : Color.secondary)
+                    .foregroundStyle(failure != nil ? ClassroomPalette.failure : active ? Color.cyan : Color.secondary)
+                    .accessibilityLabel(failure != nil ? "复查失败" : active ? "正在复查" : "等待处理")
                 Text(name)
                     .font(.callout.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                if active {
+                if failure != nil {
+                    Text("需要处理")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(ClassroomPalette.failure)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(ClassroomPalette.failure.opacity(0.12), in: Capsule())
+                } else if active {
                     Text("正在复查")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(Color.cyan)
@@ -1667,7 +1945,7 @@ struct LearningReviewControls: View {
                         .padding(.vertical, 2)
                         .background(Color.cyan.opacity(0.12), in: Capsule())
                 } else {
-                    Text(failure == nil ? "等待处理" : "需要处理")
+                    Text("等待处理")
                         .font(.caption2)
                         .foregroundStyle(ReadingAccessibility.secondaryText)
                 }
@@ -1716,7 +1994,7 @@ struct LearningReviewControls: View {
                 Image(systemName: available ? "folder" : "folder.badge.questionmark")
                     .font(.caption2)
                     .foregroundStyle(available ? Color.secondary : ClassroomPalette.attention)
-                Text(available ? directory.path : "录音文件夹已移动或不可用")
+                Text(available ? directory.lastPathComponent : "录音文件夹已移动或不可用")
                     .font(.caption2)
                     .foregroundStyle(ReadingAccessibility.secondaryText)
                     .lineLimit(1)
@@ -1729,12 +2007,14 @@ struct LearningReviewControls: View {
                     Button("重试") { queue.retryJob(id) }
                     .accessibilityLabel(ContextualActionName.review("重试", name: name, scope: scope))
                         .buttonStyle(.borderless)
+                        .foregroundStyle(.primary)
                         .font(.caption)
                         .help("重新处理这项复查；已经完成的批次不会重复。")
                 }
                 Button("移到最后") { queue.moveJobToEnd(id) }
                     .accessibilityLabel(ContextualActionName.review("移到最后", name: name, scope: scope))
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .font(.caption)
                     .disabled(isLast)
                     .help(isLast ? "已经在队列末尾" : "调整复查顺序；正在运行的任务会先安全取消当前批次。")
@@ -1742,6 +2022,7 @@ struct LearningReviewControls: View {
                     Button("重新定位文件夹…") { relocateRecording(id: id, from: directory, name: name) }
                     .accessibilityLabel(ContextualActionName.review("重新定位文件夹", name: name, scope: scope))
                         .buttonStyle(.borderless)
+                        .foregroundStyle(.primary)
                         .font(.caption)
                         .help("选择录音文件夹的新位置；LiveLingo 会检查原笔记是否一致。")
                 }
@@ -1749,6 +2030,7 @@ struct LearningReviewControls: View {
                 Button("移出队列…") { pendingQueueRemoval = id }
                     .accessibilityLabel(ContextualActionName.review("移出队列", name: name, scope: scope))
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .font(.caption)
                     .help("只从复查队列移除这项任务，不会删除任何文件。")
             }
@@ -1800,29 +2082,30 @@ private struct ClassroomLivePreview: View {
         #endif
             if model.hasActiveSession || model.phase == .stopping || !stream.volatileEnglish.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .opacity(stream.volatileEnglish.isEmpty ? 0 : 1)
+                    HStack(spacing: 6) {
                         Text(stream.volatileEnglish.isEmpty ? "等待下一句" : "正在识别")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(ReadingAccessibility.secondaryText)
+                        if !stream.volatileEnglish.isEmpty {
+                            ProgressView().controlSize(.mini)
+                        }
                     }
-                    // 与浮动字幕同源：没有逐词预览（系统语音资源未安装）时回退到
+                    // 与悬浮字幕同源：没有逐词预览（系统语音资源未安装）时回退到
                     // 最近一条定稿英文字幕，初译不再被流式英文是否为空卡住。
                     if let caption = model.nonEnglishPreviewPresentation, caption.isSourceOnly {
                         previewSlotMeasure(size: textSize * 16 / 18, weight: .regular)
                         previewReadingSlot(model.previewChineseDisplay, size: textSize, weight: .regular,
-                                           languageName: caption.languageName)
+                                           languageName: caption.languageName, rendersTranslation: true)
                     } else {
                         previewReadingSlot(model.previewEnglishDisplay,
                                            size: textSize * 16 / 18, weight: .regular,
                                            languageName: model.nonEnglishPreviewPresentation?.languageName)
                         previewReadingSlot(model.previewChineseDisplay,
-                                           size: textSize, weight: .regular)
+                                           size: textSize, weight: .regular, rendersTranslation: true)
                     }
                 }
-                .padding(14)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color(nsColor: .controlBackgroundColor))
                 #if DEBUG
@@ -1848,31 +2131,36 @@ private struct ClassroomLivePreview: View {
     }
 
     private func previewReadingSlot(_ text: String, size: Double, weight: Font.Weight,
-                                    languageName: String? = nil) -> some View {
+                                    languageName: String? = nil, rendersTranslation: Bool = false) -> some View {
         previewSlotMeasure(size: size, weight: weight)
             .overlay {
                 ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            if let languageName {
-                                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                    CaptionLanguageLabel(name: languageName, subtitleSize: size, scale: textSize / 18)
-                                    previewText(text, size: size, weight: weight)
-                                }
-                                .accessibilityElement(children: .contain)
-                            } else {
-                                previewText(text, size: size, weight: weight)
+                    HStack(alignment: .top, spacing: 8 * textSize / 18) {
+                        if let languageName {
+                            CaptionLanguageLabel(name: languageName, subtitleSize: size, scale: textSize / 18)
+                        }
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 0) {
+                                previewText(text, size: size, weight: weight, rendersTranslation: rendersTranslation)
+                                Color.clear.frame(height: 1).id("preview-tail")
                             }
-                            Color.clear.frame(height: 1).id("preview-tail")
                         }
                     }
+                    .accessibilityElement(children: .contain)
                     .onChange(of: text) { proxy.scrollTo("preview-tail", anchor: .bottom) }
                 }
             }
     }
 
-    private func previewText(_ text: String, size: Double, weight: Font.Weight) -> some View {
-        Text(text)
+    private func previewText(_ text: String, size: Double, weight: Font.Weight,
+                             rendersTranslation: Bool) -> some View {
+        Group {
+            if rendersTranslation {
+                LiveFormulaText(text: text, bodySize: size).equatable()
+            } else {
+                Text(text)
+            }
+        }
             .font(.system(size: size, weight: weight))
             .lineSpacing(7)
             .foregroundStyle(.primary)
@@ -1948,13 +2236,290 @@ private struct ActiveCaptionTranslation: View {
         #endif
         // Membership delivery and view removal need not happen in the same pass.
         if stream.translatingSegmentID == segmentID, !stream.streamingChinese.isEmpty {
-            Text(target.renderForDisplay(stream.streamingChinese, converter: converter))
+            LiveFormulaText(text: target.renderForDisplay(stream.streamingChinese, converter: converter), bodySize: textSize).equatable()
                 .font(.system(size: textSize))
                 .lineSpacing(7)
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// Observe manual recognition outside the Equatable caption. Changes to another
+/// row's status cannot invalidate the caption's text or translation stream.
+struct ChineseRecognitionCaptionRow: View {
+    let segment: TranscriptSegment
+    let textSize: Double
+    let stream: FinalCaptionState
+    var target: OutputLanguage = .simplifiedChinese
+    var converter: ChineseScriptConverter = .shared
+    @ObservedObject var state: ChineseRecognitionPresentationState
+    let availability: () -> ChineseRecognitionAvailability
+    let recognize: () -> Void
+    let cancel: () -> Void
+    let undo: () -> Void
+    @State private var isHovered = false
+    @State private var hasShownActions = false
+    @StateObject private var menuAvailability = ChineseRecognitionMenuAvailabilityState()
+    #if DEBUG
+    var hoveredForTesting = false
+    #endif
+
+    private var showsActions: Bool {
+        #if DEBUG
+        isHovered || hoveredForTesting
+        #else
+        isHovered
+        #endif
+    }
+
+    var body: some View {
+        let presentation = actionPresentation()
+        VStack(alignment: .leading, spacing: 0) {
+            TranscriptCaptionRow(segment: segment, textSize: textSize, stream: stream,
+                                 target: target, converter: converter)
+                .equatable()
+            if presentation.statusText != nil {
+                ChineseRecognitionCaptionStatus(presentation: presentation, cancel: performCancellation)
+                    .padding(.leading, 16 + 54 * textSize / 18 + 14)
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 14)
+            }
+        }
+        .contentShape(Rectangle())
+        .contextMenu {
+            // SwiftUI eagerly constructs context-menu content. Capture the
+            // provider here and resolve it only when the actions appear.
+            ChineseRecognitionResolvingMenu(status: state.statuses[segment.id],
+                canUndo: segment.canUndoChineseRecognition, availability: availability,
+                courseState: state,
+                recognize: recognize, cancel: performCancellation, undo: undo,
+                availabilityState: menuAvailability)
+        }
+        .overlay(alignment: .topTrailing) {
+            if hasShownActions || showsActions {
+                // Mount after the first hover, then retain the native control
+                // while its popup owns the pointer. Its cached availability
+                // never reads a WAV header during unrelated status updates.
+                Menu {
+                    recognitionMenu
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .frame(width: 28, height: 24)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .foregroundStyle(ReadingAccessibility.secondaryText)
+                .help(presentation.unavailableReason ?? "字幕操作")
+                .accessibilityLabel(presentation.actionsAccessibilityLabel)
+                .accessibilityIdentifier("caption-chinese-actions-\(segment.id)")
+                .opacity(showsActions ? 1 : 0)
+                .allowsHitTesting(showsActions)
+                .accessibilityHidden(!showsActions)
+                .padding(.top, 4)
+                .padding(.trailing, 12)
+            }
+        }
+        .onHover { hovered in
+            if hovered && !isHovered {
+                menuAvailability.resolve(using: availability)
+                hasShownActions = true
+            }
+            isHovered = hovered
+        }
+    }
+
+    private var recognitionMenu: ChineseRecognitionObservingMenu {
+        ChineseRecognitionObservingMenu(status: state.statuses[segment.id],
+            canUndo: segment.canUndoChineseRecognition, courseState: state,
+            availabilityState: menuAvailability, recognize: recognize, cancel: performCancellation, undo: undo)
+    }
+
+    func actionPresentation(availability: ChineseRecognitionAvailability = .available) -> ChineseRecognitionRowPresentation {
+        ChineseRecognitionRowPresentation(status: state.statuses[segment.id], availability: availability,
+            canUndo: segment.canUndoChineseRecognition, courseActionsAvailability: state.courseActionsAvailability)
+    }
+
+    /// The inline button and both menus use this same guarded event handler.
+    func performCancellation() {
+        let presentation = actionPresentation()
+        guard presentation.canCancel else { return }
+        cancel()
+    }
+}
+
+@MainActor
+final class ChineseRecognitionMenuAvailabilityState: ObservableObject {
+    @Published private(set) var value = ChineseRecognitionAvailability.unavailable("正在检查本句录音…")
+
+    func resolve(using provider: () -> ChineseRecognitionAvailability) {
+        value = provider()
+    }
+}
+
+/// Native menus can retain already-constructed content. Observe course permission
+/// inside that content, independently of the cached recording availability.
+struct ChineseRecognitionObservingMenu: View {
+    let status: ChineseRecognitionStatus?
+    let canUndo: Bool
+    @ObservedObject var courseState: ChineseRecognitionPresentationState
+    @ObservedObject var availabilityState: ChineseRecognitionMenuAvailabilityState
+    let recognize: () -> Void
+    let cancel: () -> Void
+    let undo: () -> Void
+
+    var actions: ChineseRecognitionCaptionMenu {
+        ChineseRecognitionCaptionMenu(presentation: ChineseRecognitionRowPresentation(
+            status: status, availability: availabilityState.value, canUndo: canUndo,
+            courseActionsAvailability: courseState.courseActionsAvailability),
+            recognize: recognize, cancel: cancel, undo: undo)
+    }
+
+    var body: some View { actions }
+}
+
+/// A closed native menu may construct its body without appearing. Keep audio
+/// inspection in the appearance callback, never in either view's body.
+struct ChineseRecognitionResolvingMenu: View {
+    let status: ChineseRecognitionStatus?
+    let canUndo: Bool
+    let availability: () -> ChineseRecognitionAvailability
+    let recognize: () -> Void
+    let cancel: () -> Void
+    let undo: () -> Void
+    @ObservedObject private var courseState: ChineseRecognitionPresentationState
+    @ObservedObject private var availabilityState: ChineseRecognitionMenuAvailabilityState
+
+    init(status: ChineseRecognitionStatus?, canUndo: Bool,
+         availability: @escaping () -> ChineseRecognitionAvailability,
+         courseState: ChineseRecognitionPresentationState,
+         recognize: @escaping () -> Void, cancel: @escaping () -> Void, undo: @escaping () -> Void,
+         availabilityState: ChineseRecognitionMenuAvailabilityState? = nil) {
+        self.status = status
+        self.canUndo = canUndo
+        self.availability = availability
+        self.courseState = courseState
+        self.recognize = recognize
+        self.cancel = cancel
+        self.undo = undo
+        self.availabilityState = availabilityState ?? ChineseRecognitionMenuAvailabilityState()
+    }
+
+    private var observedMenu: ChineseRecognitionObservingMenu {
+        ChineseRecognitionObservingMenu(status: status, canUndo: canUndo,
+            courseState: courseState, availabilityState: availabilityState,
+            recognize: recognize, cancel: cancel, undo: undo)
+    }
+
+    var actions: ChineseRecognitionCaptionMenu { observedMenu.actions }
+
+    var body: some View {
+        observedMenu.onAppear(perform: menuDidAppear)
+    }
+
+    /// Also accepts an explicit menu-opening lifecycle event in native hosts
+    /// that render SwiftUI menu actions without delivering appearance callbacks.
+    func menuDidAppear() {
+        availabilityState.resolve(using: availability)
+    }
+}
+
+/// Both entry points share their exact titles, disabled reasons and actions.
+struct ChineseRecognitionCaptionMenu: View {
+    let presentation: ChineseRecognitionRowPresentation
+    let recognize: () -> Void
+    let cancel: () -> Void
+    let undo: () -> Void
+
+    var body: some View {
+        Button(ChineseRecognitionRowPresentation.actionTitle, action: performRecognition)
+            .disabled(!presentation.canRecognize)
+            .help(presentation.unavailableReason ?? ChineseRecognitionRowPresentation.actionTitle)
+            .accessibilityLabel(presentation.recognizeAccessibilityLabel)
+            .accessibilityHint(presentation.unavailableReason ?? "使用本句录音按中文重新识别。")
+            .accessibilityIdentifier("caption-recognize-chinese")
+        if let reason = presentation.unavailableReason {
+            Text(verbatim: reason)
+                .accessibilityLabel(reason)
+                .accessibilityIdentifier("caption-chinese-unavailable")
+        }
+        if presentation.canCancel {
+            Button(ChineseRecognitionRowPresentation.cancelActionTitle, action: performCancellation)
+                .help(presentation.statusAccessibilityLabel ?? ChineseRecognitionRowPresentation.cancelActionTitle)
+                .accessibilityLabel(presentation.cancelAccessibilityLabel)
+                .accessibilityHint(presentation.statusAccessibilityLabel ?? "取消本次中文重识别，保留当前原句。")
+                .accessibilityIdentifier("caption-cancel-chinese-menu")
+        }
+        if presentation.showsUndo {
+            Button(ChineseRecognitionRowPresentation.undoTitle, action: performUndo)
+                .disabled(!presentation.canUndo)
+                .help(presentation.undoUnavailableReason ?? ChineseRecognitionRowPresentation.undoTitle)
+                .accessibilityLabel(presentation.undoAccessibilityLabel)
+                .accessibilityHint(presentation.undoUnavailableReason ?? "恢复中文重识别前的原句。")
+                .accessibilityIdentifier("caption-undo-chinese")
+            if let reason = presentation.undoUnavailableReason, reason != presentation.unavailableReason {
+                Text(verbatim: reason)
+                    .accessibilityLabel(reason)
+                    .accessibilityIdentifier("caption-chinese-undo-unavailable")
+            }
+        }
+    }
+
+    func performRecognition() {
+        guard presentation.canRecognize else { return }
+        recognize()
+    }
+
+    func performCancellation() {
+        guard presentation.canCancel else { return }
+        cancel()
+    }
+
+    func performUndo() {
+        guard presentation.canUndo else { return }
+        undo()
+    }
+}
+
+struct ChineseRecognitionCaptionStatus: View {
+    let presentation: ChineseRecognitionRowPresentation
+    let cancel: () -> Void
+
+    var body: some View {
+        if let status = presentation.statusText {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if presentation.isBusy {
+                    ProgressView().controlSize(.small)
+                        .accessibilityHidden(true)
+                } else if presentation.isFailure {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(ClassroomPalette.failure)
+                        .accessibilityHidden(true)
+                }
+                Text(verbatim: status)
+                    .font(.caption)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
+                    .textSelection(.disabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(presentation.statusAccessibilityLabel ?? status)
+                    .accessibilityIdentifier("caption-chinese-status")
+                if presentation.canCancel {
+                    Button(ChineseRecognitionRowPresentation.cancelTitle, action: performCancellation)
+                        .controlSize(.small)
+                        .help(presentation.statusAccessibilityLabel ?? ChineseRecognitionRowPresentation.cancelActionTitle)
+                        .accessibilityLabel(presentation.cancelAccessibilityLabel)
+                        .accessibilityHint(presentation.statusAccessibilityLabel ?? "取消本次中文重识别，保留当前原句。")
+                        .accessibilityIdentifier("caption-cancel-chinese")
+                }
+            }
+        }
+    }
+
+    func performCancellation() {
+        guard presentation.canCancel else { return }
+        cancel()
     }
 }
 
@@ -2020,6 +2585,13 @@ struct TranscriptCaptionRow: View, Equatable {
             }
             .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
+            #if DEBUG
+            .background {
+                if AppRuntimeEnvironment.isUnitTesting {
+                    CaptionFrameProbe(identifier: "classroom-text-column-\(segment.id)")
+                }
+            }
+            #endif
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 18)
@@ -2113,7 +2685,7 @@ struct SummaryMarkdownView: View {
         let document = language.profile.renderer == .identity || isLegacyRendered
             ? nil : ChineseScriptConverter.RenderText(lines.joined(separator: "\n"))
         let codeLines = FormulaDisplay.codeBlockLines(lines)
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 10 * scale) {
             ForEach(Array(lines.enumerated()), id: \.offset) { index, _ in
                 switch SummaryMarkdownLine.displayed(lines, at: index, language: language,
                     isLegacyRendered: isLegacyRendered, scheduleEvidence: scheduleEvidence,
@@ -2127,7 +2699,7 @@ struct SummaryMarkdownView: View {
                     Text(text)
                         .accessibilityHeading(.h2)
                         .font(.system(size: 18 * scale, weight: .semibold))
-                        .padding(.top, 5)
+                        .padding(.top, index > 0 ? 10 * scale : 5 * scale)
                         .accessibilityRepresentation {
                             // Selectable Text uses AppKitTextInteractionView,
                             // which exposes AXStaticText despite header traits.
@@ -2141,27 +2713,26 @@ struct SummaryMarkdownView: View {
                     DisclosureGroup(label) {
                         Text(markdown: text, bodySize: 15 * scale, baseBodySize: 15, codeProtected: codeLines[index])
                             .font(.system(size: 15 * scale))
-                            .lineSpacing(5)
+                            .lineSpacing(5 * scale)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .font(.system(size: 14 * scale))
-                    .padding(.leading, CGFloat(indentation) * 14)
+                    .padding(.leading, CGFloat(indentation) * 14 * scale)
                 case let .bullet(text, indentation):
-                    HStack(alignment: .top, spacing: 9) {
-                        Circle()
-                            .fill(Color.secondary)
-                            .frame(width: 6, height: 6)
-                            .padding(.top, 7)
+                    HStack(alignment: .firstTextBaseline, spacing: 9 * scale) {
+                        Text("•")
+                            .font(.system(size: 16 * scale))
+                            .foregroundStyle(.secondary)
                         Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16, codeProtected: codeLines[index])
                             .font(.system(size: 16 * scale))
-                            .lineSpacing(5)
+                            .lineSpacing(5 * scale)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(.leading, CGFloat(indentation) * 14)
+                    .padding(.leading, CGFloat(indentation) * 14 * scale)
                 case let .paragraph(text):
                     Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16, codeProtected: codeLines[index])
                         .font(.system(size: 16 * scale))
-                        .lineSpacing(5)
+                        .lineSpacing(5 * scale)
                         .foregroundStyle(.primary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -2212,21 +2783,34 @@ struct ReviewChangeView: View {
     var body: some View {
         let originalTokens = Self.tokens(original)
         let proposedTokens = Self.tokens(proposed)
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 8 * scale) {
             Text("原笔记").font(.system(size: 12 * scale, weight: .semibold)).foregroundStyle(ReadingAccessibility.secondaryText)
             marked(original, tokens: originalTokens, against: proposedTokens, removed: true)
             Text("核对意见 · 待核对").font(.system(size: 12 * scale, weight: .semibold)).foregroundStyle(ReadingAccessibility.secondaryText)
             marked(proposed, tokens: proposedTokens, against: originalTokens, removed: false)
         }
         .font(.system(size: 16 * scale))
-        .lineSpacing(5)
+        .lineSpacing(5 * scale)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
-private extension Text {
+/// Reuse parsed live text on unrelated app updates, while new tokens still render.
+struct LiveFormulaText: View, Equatable {
+    let text: String
+    let bodySize: Double
+
+    var body: some View {
+        #if DEBUG
+        let _ = SummaryRenderingDiagnostics.record(\.liveInlineParses)
+        #endif
+        Text(markdown: text, bodySize: bodySize)
+    }
+}
+
+extension Text {
     @MainActor
     init(markdown source: String, bodySize: Double = 18, baseBodySize: Double = 18, codeProtected: Bool = false) {
         #if DEBUG

@@ -208,8 +208,12 @@ enum ReviewReportCollection {
     static func read(in directory: URL) throws -> [ReviewReportEntry] {
         let files: [URL]
         do {
-            files = try FileManager.default.contentsOfDirectory(at: directory,
-                includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            files = try SessionArchiveCoding.privateIO(at: directory) {
+                let parent = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: false)
+                return try parent.names().map { directory.appendingPathComponent($0) }
+            }
+        } catch let error as SessionStoreError where isDeferred(error) {
+            throw error
         } catch { throw ReviewIdentityError.unreadable("无法列出课程目录（\(error.localizedDescription)）") }
         let manifestURL = directory.appendingPathComponent(manifestFileName)
         var entries: [ReviewReportEntry] = []
@@ -223,6 +227,8 @@ enum ReviewReportCollection {
                 }
                 entries = manifest.entries
                 for entry in entries { try entry.validate() }
+            } catch let error as SessionStoreError where isDeferred(error) {
+                throw error
             } catch {
                 throw ReviewIdentityError.unreadable("\(manifestFileName)（\(error.localizedDescription)）")
             }
@@ -260,12 +266,26 @@ enum ReviewReportCollection {
 
     private static func data(at url: URL) throws -> Data {
         do {
-            let info = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-            guard info.isRegularFile == true, info.isSymbolicLink != true else {
-                throw ReviewIdentityError.unreadable("\(url.lastPathComponent) 不是普通报告文件")
+            return try SessionArchiveCoding.privateIO(at: url) {
+                let parent = try SensitiveFileIO.Directory.open(at: url.deletingLastPathComponent(), create: false, tighten: false)
+                // Only the selected index/legal report leaf is recovered. This
+                // read path holds neither course nor review storage locks.
+                if try parent.needsCommittedTemporaryAliasRecovery(named: url.lastPathComponent) {
+                    try SensitiveFileIO.recoverCommittedFileIfNeeded(at: url, expectedParent: parent.identity)
+                }
+                guard let bytes = try parent.readIfPresent(named: url.lastPathComponent) else {
+                    throw ReviewIdentityError.unreadable("\(url.lastPathComponent) 不存在")
+                }
+                return bytes
             }
-            return try Data(contentsOf: url)
+        } catch let error as SessionStoreError where isDeferred(error) {
+            throw error
         } catch { throw ReviewIdentityError.unreadable("\(url.lastPathComponent)（\(error.localizedDescription)）") }
+    }
+
+    private static func isDeferred(_ error: SessionStoreError) -> Bool {
+        if case .storageDeferred = error { return true }
+        return ReviewDirectoryAccess.isUnavailable(error)
     }
 
     private static func checkConflicts(_ entries: [ReviewReportEntry]) throws {

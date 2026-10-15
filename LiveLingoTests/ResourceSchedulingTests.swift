@@ -8,10 +8,13 @@ private actor ASRTransportFixture {
     var waits: [String: CheckedContinuation<ASRHTTPResult, Error>] = [:]
     var headers: [String: String] = [:]
     var failRequests = false
+    var exited = false
     var invalidHealth = false
     var reportedPID: Int32 = 1234
     var protocolVersion = 2
     var posts = 0
+    var arrivalOrder: [String] = []
+    var chineseRequests: Set<String> = []
     var unloadingModels: [String] = []
     var suspendHealth = false
     var healthWaits: [CheckedContinuation<Void, Never>] = []
@@ -35,6 +38,11 @@ private actor ASRTransportFixture {
         }
         posts += 1
         let id = request.value(forHTTPHeaderField: "X-LiveLingo-Request-ID") ?? "missing"
+        arrivalOrder.append(id)
+        if URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
+            .contains(where: { $0.name == "language" && $0.value == "Chinese" }) == true {
+            chineseRequests.insert(id)
+        }
         headers[id] = request.value(forHTTPHeaderField: "X-LiveLingo-Token")
         requests[id] = .init(model: "0.6b", state: "running")
         if failRequests { throw URLError(.networkConnectionLost) }
@@ -45,7 +53,12 @@ private actor ASRTransportFixture {
     func finish(_ id: String) throws {
         requests.removeValue(forKey: id)
         receipts[id] = .init(model: "0.6b", state: "finished")
-        let body = try JSONSerialization.data(withJSONObject: ["request_id": id, "model": "0.6b", "text": "A complete sentence."])
+        var payload: [String: Any] = ["request_id": id, "model": "0.6b", "text": "A complete sentence."]
+        if chineseRequests.contains(id) {
+            payload.merge(["text": "今天讨论二分查找。", "language_mode": "explicit", "language": "zh",
+                "decode": "forced", "policy": 1, "generated_tokens": 12, "truncated": false]) { _, new in new }
+        }
+        let body = try JSONSerialization.data(withJSONObject: payload)
         waits.removeValue(forKey: id)?.resume(returning: .init(data: body, status: 200))
     }
     func clearRemoteWithoutReceipt(_ id: String) { requests.removeValue(forKey: id) }
@@ -54,6 +67,7 @@ private actor ASRTransportFixture {
         receipts[id] = .init(model: model, state: "finished")
     }
     func setFailRequests(_ value: Bool) { failRequests = value }
+    func setExited(_ value: Bool) { exited = value }
     func setInvalidHealth(_ value: Bool) { invalidHealth = value }
     func setPID(_ value: Int32) { reportedPID = value }
     func setProtocol(_ value: Int) { protocolVersion = value }
@@ -375,6 +389,88 @@ final class ResourceSchedulingTests: XCTestCase {
         XCTAssertTrue(ASRRequestCoordinator.validRequestID("course_chunk-0123"))
     }
 
+    func testRealtimeArrivingAfterWaitingChineseIsSubmittedFirst() async throws {
+        let fixture = ASRTransportFixture(), audio = try file(), coordinator = coordinator(fixture)
+        addTeardownBlock { await fixture.releaseAll() }
+        let a = Task { try await coordinator.transcribe(endpoint: endpoint, audioURL: audio,
+            modelKey: "0.6b", requestID: "realtime-a") }
+        try await waitUntil { await fixture.posts == 1 }
+        let b = Task { try await coordinator.transcribe(endpoint: endpoint, audioURL: audio,
+            modelKey: "0.6b", language: .chinese, requestID: "manual-b") }
+        try await waitUntil { await coordinator.pendingChineseRequestCountForTesting(endpoint: self.endpoint) == 1 }
+        let c = Task { try await coordinator.transcribe(endpoint: endpoint, audioURL: audio,
+            modelKey: "0.6b", requestID: "realtime-c") }
+        try await waitUntil { await fixture.posts == 2 }
+        try await fixture.finish("realtime-a")
+        _ = try await a.value
+        let foregroundOrder = await fixture.arrivalOrder
+        XCTAssertEqual(foregroundOrder, ["realtime-a", "realtime-c"])
+        try await fixture.finish("realtime-c")
+        _ = try await c.value
+        try await waitUntil { await fixture.posts == 3 }
+        let finalOrder = await fixture.arrivalOrder
+        XCTAssertEqual(finalOrder, ["realtime-a", "realtime-c", "manual-b"])
+        try await fixture.finish("manual-b")
+        let result = try await b.value
+        XCTAssertEqual(result.language, "zh")
+    }
+
+    func testManyWaitingChineseRequestsCannotConsumeRealtimeAdmission() async throws {
+        let fixture = ASRTransportFixture(), audio = try file(), coordinator = coordinator(fixture)
+        addTeardownBlock { await fixture.releaseAll() }
+        let a = Task { try await coordinator.transcribe(endpoint: endpoint, audioURL: audio,
+            modelKey: "0.6b", requestID: "foreground-0") }
+        try await waitUntil { await fixture.posts == 1 }
+        let manual = (0..<4).map { number in Task {
+            try await coordinator.transcribe(endpoint: endpoint, audioURL: audio, modelKey: "0.6b",
+                language: .chinese, requestID: "waiting-\(number)")
+        } }
+        try await waitUntil { await coordinator.pendingChineseRequestCountForTesting(endpoint: self.endpoint) == 4 }
+        let foreground = (1..<3).map { number in Task {
+            try await coordinator.transcribe(endpoint: endpoint, audioURL: audio,
+                modelKey: "0.6b", requestID: "foreground-\(number)")
+        } }
+        try await waitUntil { await fixture.posts == 3 }
+        let admittedPosts = await fixture.posts
+        XCTAssertEqual(admittedPosts, 3)
+        manual.forEach { $0.cancel() }
+        for task in manual { if case .success = await task.result { XCTFail("Waiting cancellation must not submit") } }
+        for number in 0..<3 { try await fixture.finish("foreground-\(number)") }
+        _ = try await a.value
+        for task in foreground { _ = try await task.value }
+        let finalPosts = await fixture.posts
+        XCTAssertEqual(finalPosts, 3)
+    }
+
+    func testCancelledRunningManualRetainsOwnershipAndReservesNoRealtimeSlot() async throws {
+        let fixture = ASRTransportFixture(), audio = try file(), coordinator = coordinator(fixture)
+        addTeardownBlock { await fixture.releaseAll() }
+        let manual = Task { try await coordinator.transcribe(endpoint: endpoint, audioURL: audio,
+            modelKey: "0.6b", language: .chinese, requestID: "cancelled-manual") }
+        try await waitUntil { await fixture.posts == 1 }
+        manual.cancel()
+        _ = await manual.result
+        var joined = false
+        let join = Task {
+            try await coordinator.waitForChineseInferenceCompletion()
+            joined = true
+        }
+        let foreground = (0..<3).map { number in Task {
+            try await coordinator.transcribe(endpoint: endpoint, audioURL: audio,
+                modelKey: "0.6b", requestID: "reserved-\(number)")
+        } }
+        try await waitUntil { await fixture.posts == 4 }
+        let ownership = await coordinator.resourceState(endpoint: endpoint)
+        XCTAssertEqual(ownership.activeCount, 4)
+        XCTAssertFalse(joined, "Cancelled caller is not an inference completion receipt")
+        try await fixture.finish("cancelled-manual")
+        try await join.value
+        XCTAssertTrue(joined)
+        for number in 0..<3 { try await fixture.finish("reserved-\(number)") }
+        for task in foreground { _ = try await task.value }
+        try await waitUntil { await coordinator.resourceState(endpoint: self.endpoint).activeCount == 0 }
+    }
+
     func testDuplicateAdmissionIsRecheckedAfterHealthSuspendsActor() async throws {
         let fixture = ASRTransportFixture(), audio = try file()
         let coordinator = coordinator(fixture)
@@ -460,6 +556,58 @@ final class ResourceSchedulingTests: XCTestCase {
         XCTAssertNil(result, "No process was launched or observed by this isolated runtime")
         let snapshot = await runtime.resourceState()
         XCTAssertEqual(snapshot.status, .stopped)
+    }
+
+    func testLateOwnedProcessExitReleasesManualInferenceLifecycleWait() async throws {
+        let fixture = ASRTransportFixture(), audio = try file()
+        let owned = ASRRuntime.Endpoint(baseURL: endpoint.baseURL, token: endpoint.token,
+            runtimeID: UUID(), processIdentifier: 1234)
+        let coordinator = ASRRequestCoordinator(confirmationTimeout: 0,
+            transport: { try await fixture.send($0) }, observeExit: { _ in await fixture.exited })
+        addTeardownBlock { await fixture.releaseAll() }
+        await fixture.setFailRequests(true)
+        await fixture.setInvalidHealth(true)
+        do {
+            _ = try await coordinator.transcribe(endpoint: owned, audioURL: audio,
+                modelKey: "0.6b", language: .chinese, requestID: "lost-manual")
+            XCTFail("Expected lost transport")
+        } catch {}
+        let unknown = await coordinator.resourceState(endpoint: owned)
+        XCTAssertEqual(unknown.unresolvedRequests, ["lost-manual"])
+        var joined = false
+        let join = Task { try await coordinator.waitForChineseInferenceCompletion(); joined = true }
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertFalse(joined)
+        await fixture.setExited(true)
+        try await waitUntil { joined }
+        try await join.value
+        let released = await coordinator.resourceState(endpoint: owned)
+        XCTAssertTrue(released.unresolvedRequests.isEmpty)
+    }
+
+    func testLateOwnedProcessExitUnblocksQueuedChineseWithoutDroppingOwnershipEarly() async throws {
+        let fixture = ASRTransportFixture(), audio = try file()
+        let owned = ASRRuntime.Endpoint(baseURL: endpoint.baseURL, token: endpoint.token,
+            runtimeID: UUID(), processIdentifier: 1234)
+        let coordinator = ASRRequestCoordinator(confirmationTimeout: 0,
+            transport: { try await fixture.send($0) }, observeExit: { _ in await fixture.exited })
+        addTeardownBlock { await fixture.releaseAll() }
+        await fixture.setFailRequests(true)
+        await fixture.setInvalidHealth(true)
+        do {
+            _ = try await coordinator.transcribe(endpoint: owned, audioURL: audio,
+                modelKey: "0.6b", requestID: "lost-realtime")
+            XCTFail("Expected lost transport")
+        } catch {}
+        let b = Task { try await coordinator.transcribe(endpoint: owned, audioURL: audio,
+            modelKey: "0.6b", language: .chinese, requestID: "waiting-after-exit") }
+        try await waitUntil { await coordinator.pendingChineseRequestCountForTesting(endpoint: owned) == 1 }
+        let postsBeforeExit = await fixture.posts
+        XCTAssertEqual(postsBeforeExit, 1)
+        await fixture.setExited(true)
+        if case .success = await b.result { XCTFail("Dead transport must fail explicitly") }
+        let released = await coordinator.resourceState(endpoint: owned)
+        XCTAssertTrue(released.unresolvedRequests.isEmpty)
     }
 
     func testUnloadingModelsKeepReleaseUnconfirmed() async {

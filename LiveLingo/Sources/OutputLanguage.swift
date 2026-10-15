@@ -130,10 +130,17 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         let hasSnapshot = origin.map { $0 == .snapshot }
             ?? FileManager.default.fileExists(atPath: directory.appendingPathComponent(SessionStore.snapshotFileName).path)
         if hasSnapshot { return .simplifiedChinese }
+        // Export-managed root links are resolved and verified as a generation;
+        // the manifest itself is still opened as a strict, real file leaf.
+        let exports = try SessionExporter.currentExportDirectory(in: directory)
+        let manifest = exports.appendingPathComponent("manifest.json")
+        let data = try SessionArchiveCoding.privateIO(at: manifest, { try SensitiveFileIO.readIfPresent(at: manifest) })
+        return try legacyLanguage(manifestBytes: data)
+    }
+
+    static func legacyLanguage(manifestBytes: Data?) throws -> Self {
         struct Metadata: Decodable { let targetLocale: String? }
-        let manifest = directory.appendingPathComponent("manifest.json")
-        if let data = try? Data(contentsOf: manifest),
-           let metadata = try? JSONDecoder().decode(Metadata.self, from: data) {
+        if let manifestBytes, let metadata = try? JSONDecoder().decode(Metadata.self, from: manifestBytes) {
             // The non-regional code occurs in synthetic verifier fixtures,
             // not released exporters. Continue using the supported generator.
             if metadata.targetLocale == "zh-Hant" { return .simplifiedChinese }
@@ -238,7 +245,7 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
 /// One policy switch and one table for fixed classroom output text. The user
 /// has not selected target-language labels yet; interface Chinese is the default.
 enum ClassroomFixedText: String, CaseIterable {
-    case pendingTranslation, failedAgainstSource, failedAgainstEnglish, formulaNeedsReview, transcriptHeading, exportTranscriptToggle
+    case pendingTranslation, failedAgainstSource, failedAgainstEnglish, modelUntranslatedAgainstSource, modelUntranslatedAgainstEnglish, formulaNeedsReview, transcriptHeading, exportTranscriptToggle
     case notesHeading, replayHeading, sourceCheckHeading, sourceText, earlierSourceText
     case kindCore, kindRelationship, kindExample, kindPitfall, kindBackground
     case kindPending, stateMissing, stateSupplemented, stateConflict, stateUnclear
@@ -267,6 +274,8 @@ enum ClassroomFixedText: String, CaseIterable {
         .pendingTranslation: ["zh": "（本段暂无译文）", "en": "(Translation pending)"],
         .failedAgainstSource: ["zh": "（本段翻译未完成，可对照原文）", "en": "(Translation incomplete; see source)"],
         .failedAgainstEnglish: ["zh": "（本段翻译未完成，可对照英文）", "en": "(Translation incomplete; see English source)"],
+        .modelUntranslatedAgainstSource: ["zh": "（模型未翻译此句，可对照原文）", "en": "(The model did not translate this sentence; see source)"],
+        .modelUntranslatedAgainstEnglish: ["zh": "（模型未翻译此句，可对照英文）", "en": "(The model did not translate this sentence; see English source)"],
         .formulaNeedsReview: ["zh": "【公式待核对】", "en": "[Formula needs review]"],
         .transcriptHeading: ["zh": "字幕（含时间戳）", "en": "Captions (with timestamps)"],
         .exportTranscriptToggle: ["zh": "附带字幕与时间戳（按所选范围）", "en": "Include captions and timestamps for this scope"],

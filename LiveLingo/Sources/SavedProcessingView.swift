@@ -6,9 +6,7 @@ struct SavedProcessingView: View {
     @ObservedObject var model: AppModel
 
     private var actionable: [TranscriptionWorkRecord] {
-        model.savedTranscriptionWork.filter {
-            $0.needsWork || $0.status == .failed || $0.status == .otherLanguage || $0.candidateText != nil
-        }
+        model.savedTranscriptionWork.filter(SavedProcessingPresentation.showsTranscriptionTask)
     }
 
     var body: some View {
@@ -38,6 +36,14 @@ struct SavedProcessingView: View {
                             .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     } else if let summary = SavedProcessingPresentation.languageSummary(segments: model.segments) {
                         Text(summary)
+                            .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    }
+                    if model.transcriptionProcessing == nil,
+                       let summary = SavedProcessingPresentation.noSpeechSummary(count: model.savedNoSpeechCount) {
+                        Text(summary).font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    }
+                    if model.savedNoSpeechCount > 0 {
+                        Text("这些片段的音频已保留，可用下方“重试这段”手动重试。")
                             .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     }
                     HStack {
@@ -94,7 +100,7 @@ struct SavedProcessingView: View {
                                     .monospacedDigit()
                                 Text(SavedProcessingPresentation.recordLabel(record.status)).foregroundStyle(ReadingAccessibility.secondaryText)
                                 Spacer(minLength: 8)
-                                if record.status == .failed || record.status == .otherLanguage {
+                                if SavedProcessingPresentation.canRetryTranscription(record) {
                                     Button("重试这段") { model.resumeSavedProcessing(retryID: record.id) }
                                         .disabled(model.legacyProvenanceUnavailable)
                                         .accessibilityLabel("重试 \(LearningTimeLabel.stamp(record.start)) 至 \(LearningTimeLabel.stamp(record.end)) 的转写")
@@ -208,19 +214,26 @@ struct TranscriptionCandidateEditor: View {
                     Text("保留的原文").font(.subheadline.weight(.semibold))
                     Text(candidate.originalText.isEmpty ? "本段暂无原文" : candidate.originalText)
                         .textSelection(.enabled)
+                        .padding(6)
                         .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(ReadingAccessibility.secondaryText.opacity(0.7)))
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 VStack(alignment: .leading, spacing: 6) {
                     Text("候选文字 · 可编辑").font(.subheadline.weight(.semibold))
                     TextEditor(text: $draft.text)
                         .font(.body)
-                        .frame(minHeight: 100)
+                        .scrollContentBackground(.hidden)
+                        .padding(6)
+                        .frame(maxWidth: .infinity, minHeight: 100, maxHeight: 200, alignment: .topLeading)
+                        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(ReadingAccessibility.secondaryText.opacity(0.7)))
                         .accessibilityLabel("\(LearningTimeLabel.stamp(candidate.start)) 的候选文字")
                         .accessibilityIdentifier("candidate-editor-\(candidate.id)")
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Text("确认后重做这段的译文和相关笔记；旧正文、笔记及核对意见继续保留。")
-                .font(.caption).foregroundStyle(ReadingAccessibility.secondaryText)
             if draft.hasConflict {
                 Text("本段来源已更新；你的编辑已保留，请对照新原文重新核对后确认。")
                     .foregroundStyle(ReadingAccessibility.secondaryText)
@@ -232,23 +245,29 @@ struct TranscriptionCandidateEditor: View {
                 .accessibilityLabel(ContextualActionName.candidate("已核对更新，保留编辑", start: candidate.start, end: candidate.end))
                 .accessibilityIdentifier("candidate-acknowledge-\(candidate.id)")
             }
-            HStack {
+            HStack(alignment: .bottom, spacing: 14) {
                 Button("保留原文") {
                     model.dismissTranscriptionCandidate(candidate.id, expectedCandidate: candidate.text)
                 }
                 .accessibilityLabel(ContextualActionName.candidate("保留原文", start: candidate.start, end: candidate.end))
-                Spacer()
-                Button("确认采用编辑后的文字") {
-                    guard !draft.hasConflict else { return }
-                    let source = draft.source
-                    model.acceptTranscriptionCandidate(candidate.id, editedText: draft.text,
-                        expectedOriginal: source.candidate.originalText, expectedRevision: source.revision,
-                        expectedCandidate: source.candidate.text, expectedSession: source.candidate.sessionID)
+                Spacer(minLength: 0)
+                VStack(alignment: .trailing, spacing: 6) {
+                    Text("确认后重做这段的译文和相关笔记；旧正文、笔记及核对意见继续保留。")
+                        .font(.caption).foregroundStyle(ReadingAccessibility.secondaryText)
+                        .multilineTextAlignment(.trailing)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("确认采用编辑后的文字") {
+                        guard !draft.hasConflict else { return }
+                        let source = draft.source
+                        model.acceptTranscriptionCandidate(candidate.id, editedText: draft.text,
+                            expectedOriginal: source.candidate.originalText, expectedRevision: source.revision,
+                            expectedCandidate: source.candidate.text, expectedSession: source.candidate.sessionID)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(draft.hasConflict || draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityLabel(ContextualActionName.candidate("确认采用编辑后的文字", start: candidate.start, end: candidate.end))
+                    .accessibilityIdentifier("candidate-accept-\(candidate.id)")
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(draft.hasConflict || draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .accessibilityLabel(ContextualActionName.candidate("确认采用编辑后的文字", start: candidate.start, end: candidate.end))
-                .accessibilityIdentifier("candidate-accept-\(candidate.id)")
             }
         }
         .padding(14)

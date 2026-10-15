@@ -102,34 +102,72 @@ final class ClassroomAppearanceTests: XCTestCase {
         }
     }
 
-    func testFollowLatestUsesTheSameGrayInBothCompatibilityPaths() async throws {
-        guard ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 15 else {
-            throw XCTSkip("Compare both modifier chains using the same modern native renderer")
-        }
+    func testFollowLatestHasDistinctGraphiteSelectionInBothAppearancesAndFocusStates() async throws {
         for dark in [false, true] {
-            for selected in [false, true] {
-                func root(version: OperatingSystemVersion) -> some View {
-                    Toggle("跟随最新", isOn: .constant(selected))
-                        .toggleStyle(.button).controlSize(.small)
-                        .classroomTint(.gray, on: version)
+            for active in [ControlActiveState.key, .inactive] {
+                func root(updated: Bool, selected: Bool) -> AnyView {
+                    let toggle = Toggle("跟随最新", isOn: .constant(selected))
+                    let control = updated
+                        ? AnyView(toggle.toggleStyle(ClassroomFollowLatestToggleStyle()))
+                        : AnyView(toggle.toggleStyle(.button).classroomTint(.gray))
+                    return AnyView(control.controlSize(.small)
                         .padding(24)
                         .frame(width: 200, height: 80)
                         .background(Color(nsColor: .windowBackgroundColor))
                         .environment(\.colorScheme, dark ? .dark : .light)
-                        .environment(\.controlActiveState, .key)
+                        .environment(\.controlActiveState, active))
                 }
-                let controller = NSHostingController(rootView:
-                    root(version: .init(majorVersion: 15, minorVersion: 0, patchVersion: 0)))
+                let controller = NSHostingController(rootView: root(updated: false, selected: true))
                 let window = makeWindow(controller: controller, dark: dark)
                 defer { window.close() }
                 try await settle(controller.view)
-                let modern = try pixels(controller.view)
-                controller.rootView = root(version: sonoma)
+                let before = try pixels(controller.view)
+                controller.rootView = root(updated: true, selected: true)
                 try await settle(controller.view)
-                assertPixelMatch(modern, try pixels(controller.view),
-                    name: "follow latest dark=\(dark) selected=\(selected)")
+                let selected = try pixels(controller.view)
+                controller.rootView = root(updated: true, selected: false)
+                try await settle(controller.view)
+                let unselected = try pixels(controller.view)
+                let graphite: UInt32 = dark ? 0x747479 : 0x636366
+                XCTAssertGreaterThan(selected.count(hex: graphite), 500,
+                                     "Selection needs an opaque graphite interior even when inactive")
+                XCTAssertGreaterThan(selected.count(hex: graphite), unselected.count(hex: graphite) + 500)
+                XCTAssertNotEqual(before.rgba, selected.rgba)
+                XCTAssertNotEqual(selected.rgba, unselected.rgba)
+                let prefix = "follow-\(dark ? "dark" : "light")-\(active == .key ? "key" : "inactive")"
+                let directory = TestFixtureDirectory.root.appendingPathComponent("follow-appearance", isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                for (suffix, image) in [("before-selected", before), ("after-selected", selected),
+                                        ("after-unselected", unselected)] {
+                    attach(image, name: prefix + "-" + suffix)
+                    try image.png.write(to: directory.appendingPathComponent(prefix + "-" + suffix + ".png"))
+                }
+                XCTAssertEqual(window.alphaValue, 0, "All captures must remain offscreen")
             }
         }
+    }
+
+    func testFollowLatestCustomTogglePreservesActionAndDisabledState() async throws {
+        var selected = false
+        var changes = 0
+        func root(enabled: Bool) -> some View {
+            Toggle("跟随最新", isOn: Binding(get: { selected }, set: { selected = $0; changes += 1 }))
+                .toggleStyle(ClassroomFollowLatestToggleStyle())
+                .disabled(!enabled)
+                .frame(width: 200, height: 80)
+        }
+        let controller = NSHostingController(rootView: root(enabled: true))
+        let window = makeWindow(controller: controller, dark: false)
+        defer { window.close() }
+        try await settle(controller.view)
+        try clickCenter(of: controller.view, in: window)
+        XCTAssertTrue(selected)
+        XCTAssertEqual(changes, 1)
+        controller.rootView = root(enabled: false)
+        try await settle(controller.view)
+        try clickCenter(of: controller.view, in: window)
+        XCTAssertTrue(selected)
+        XCTAssertEqual(changes, 1)
     }
 
     func testLegacyPrimaryButtonHasAnOpaqueGraphiteFill() async throws {
@@ -251,6 +289,11 @@ final class ClassroomAppearanceTests: XCTestCase {
     private func pixels(_ view: NSView) throws -> Pixels {
         XCTAssertTrue(try XCTUnwrap(view.window).isKeyWindow, "The window must remain key at capture time")
         XCTAssertTrue(try XCTUnwrap(view.window).isMainWindow, "The window must remain main at capture time")
+        // Root replacement can discard an automatically focused Toggle. Both
+        // rendering arms need the same unfocused state, independently of other
+        // tests' synthetic keyboard navigation and without activating the host.
+        XCTAssertTrue(try XCTUnwrap(view.window).makeFirstResponder(nil))
+        view.displayIfNeeded()
         let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
         view.cacheDisplay(in: view.bounds, to: bitmap)
         let image = try XCTUnwrap(bitmap.cgImage)

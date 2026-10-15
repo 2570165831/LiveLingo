@@ -49,7 +49,7 @@ In Save recording and notes mode, click **End and save (结束并保存)** after
 
 In Temporary live session mode, the button is **End session (结束记录)**. A normal end discards the session. Starting again after either mode creates a new recording.
 
-The **Recording (录音)** menu offers the same actions. Use **⌘R** to start or end a session and **⌘⇧P** to pause or resume.
+The **Recording (录音)** menu offers the same actions. Use **⌘R** to start or end a session and **⇧⌘P** to pause or resume.
 
 ## Live captions and language labels
 
@@ -80,7 +80,7 @@ Use the lock icon beside Floating subtitles in the main window to lock the panel
 
 1. Click **Unlock floating subtitles (解锁浮动字幕)** using the lock icon in the main window.
 2. In normal mode, choose **Recording → Unlock floating subtitles**. In full-screen class mode, use that action in the LiveLingo menu-bar icon's menu.
-3. Press **⌘⇧L** while LiveLingo is the foreground app. This is an app shortcut, not a global shortcut.
+3. Press **⇧⌘L** while LiveLingo is the foreground app. This is an app shortcut, not a global shortcut.
 
 The panel starts unlocked on each launch.
 

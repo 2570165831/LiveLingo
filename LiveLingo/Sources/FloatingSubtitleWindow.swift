@@ -1,5 +1,6 @@
 #if !LIVELINGO_CLI
 import AppKit
+import Combine
 import SwiftUI
 
 struct FloatingSubtitleWindowSettings: Equatable {
@@ -8,6 +9,7 @@ struct FloatingSubtitleWindowSettings: Equatable {
     var backgroundOpacity = 1.0
     var fullScreenClassMode = false
     var popupIsOpen = false
+    var alarmIsPresented = false
 
     // Apple DTS, forums/thread/826308: floating and statusBar remain below
     // other apps' full-screen content; screenSaver is the lowest named level
@@ -79,7 +81,7 @@ final class FloatingSubtitleWindowConfiguration {
         guard let window else { return }
         window.level = settings.level
         window.collectionBehavior = settings.collectionBehavior(restoring: originalCollectionBehavior)
-        window.ignoresMouseEvents = settings.isLocked || originalIgnoresMouseEvents
+        window.ignoresMouseEvents = !settings.alarmIsPresented && (settings.isLocked || originalIgnoresMouseEvents)
         window.isOpaque = settings.backgroundOpacity < 1 ? false : originalIsOpaque
         window.subtitleBackgroundColor = settings.backgroundOpacity < 1 ? .clear : originalBackgroundColor
         window.invalidateShadow()
@@ -97,6 +99,12 @@ final class FloatingSubtitleWindowConfiguration {
 }
 
 enum FloatingSubtitleWindowPlacement {
+    static func topFrame(windowSize: NSSize, visibleFrame: NSRect, topInset: CGFloat = 20) -> NSRect {
+        let inset = min(max(0, topInset), max(0, visibleFrame.height - windowSize.height))
+        return NSRect(x: visibleFrame.midX - windowSize.width / 2,
+                      y: visibleFrame.maxY - windowSize.height - inset,
+                      width: windowSize.width, height: windowSize.height)
+    }
     /// AppKit coordinates grow upwards. visibleFrame already excludes the Dock
     /// and menu bar, including on displays with negative or vertical origins.
     /// Preserve subtitle layout even if a display is smaller than the window.
@@ -104,6 +112,19 @@ enum FloatingSubtitleWindowPlacement {
         let inset = min(max(0, bottomInset), max(0, visibleFrame.height - windowSize.height))
         return NSRect(x: visibleFrame.midX - windowSize.width / 2,
                       y: visibleFrame.minY + inset, width: windowSize.width, height: windowSize.height)
+    }
+
+    static func resizedFrame(previous: NSRect, size: NSSize, visibleFrame: NSRect?) -> NSRect {
+        var frame = NSRect(x: previous.minX, y: previous.maxY - size.height, width: size.width, height: size.height)
+        guard let visibleFrame else { return frame }
+        // Bottom-positioned subtitles grow upwards; elsewhere preserve the top
+        // edge, then constrain the entire banner and subtitle area to this display.
+        if previous.minY >= visibleFrame.minY, previous.minY <= visibleFrame.minY + 24 {
+            frame.origin.y = previous.minY
+        }
+        frame.origin.y = max(visibleFrame.minY, min(frame.minY, visibleFrame.maxY - frame.height))
+        frame.origin.x = max(visibleFrame.minX, min(frame.minX, visibleFrame.maxX - frame.width))
+        return frame
     }
 }
 
@@ -132,6 +153,28 @@ struct FloatingSubtitleWindowScreens {
     }
 }
 
+/// AppKit releases a nonactivating panel's borrowed keyboard focus when it is
+/// ordered out. Ordering it front again preserves visibility without making it
+/// key or activating the application. Tests inject these operations and key
+/// ownership so no native window needs to be shown or focused.
+@MainActor
+struct FloatingSubtitleWindowFocus {
+    var isKeyWindow: (NSPanel) -> Bool
+    var isVisible: (NSPanel) -> Bool
+    var orderOut: (NSPanel) -> Void
+    var orderFront: (NSPanel) -> Void
+
+    static let live = Self(isKeyWindow: { $0.isKeyWindow }, isVisible: { $0.isVisible },
+                           orderOut: { $0.orderOut(nil) }, orderFront: { $0.orderFront(nil) })
+
+    func returnKeyboardFocus(from panel: NSPanel) {
+        guard isKeyWindow(panel) else { return }
+        let wasVisible = isVisible(panel)
+        orderOut(panel)
+        if wasVisible { orderFront(panel) }
+    }
+}
+
 /// Owns one nonactivating panel, rather than borrowing a SwiftUI scene window.
 /// SwiftUI hosts only its content and cannot rewrite scene-level window policy.
 /// Locking and visibility are memory-only; every launch starts closed/unlocked.
@@ -146,25 +189,32 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     private let defaults: UserDefaults
     private let screens: FloatingSubtitleWindowScreens
     private let notificationCenter: NotificationCenter
+    private let focus: FloatingSubtitleWindowFocus
     private var configuration: FloatingSubtitleWindowConfiguration?
     private var settings = FloatingSubtitleWindowSettings()
-    private var pendingBottomPlacement = false
+    private enum Placement { case top, bottom }
+    private var pendingPlacement: Placement?
     private var adjustingMenuBarClearance = false
+    private var applicationHidden = false
 
     #if DEBUG
     // Tests can observe the owned panel without replacing its configuration or content.
     var panelFactoryForTesting: ((NSRect, NSWindow.StyleMask) -> NSPanel)?
     #endif
 
+    private var alarmBannerSubscription: AnyCancellable?
+
     var panel: NSPanel? { window as? NSPanel }
-    var lockActionTitle: String { isLocked ? "解锁浮动字幕" : "锁定浮动字幕" }
+    var lockActionTitle: String { isLocked ? "解锁悬浮字幕" : "锁定悬浮字幕" }
 
     init(defaults: UserDefaults = .standard, screens: FloatingSubtitleWindowScreens = .live,
-         notificationCenter: NotificationCenter = .default) {
+         notificationCenter: NotificationCenter = .default, focus: FloatingSubtitleWindowFocus = .live) {
         self.defaults = defaults
         self.screens = screens
         self.notificationCenter = notificationCenter
+        self.focus = focus
         super.init(window: nil)
+        applicationHidden = NSApp?.isHidden == true
         for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
             notificationCenter.addObserver(self, selector: #selector(applicationVisibilityChanged(_:)),
                                            name: name, object: NSApp)
@@ -188,7 +238,7 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         // Setting isFloatingPanel can change the level itself. Capture factory
         // values before any owned policy so shutdown restores the real original.
         let panelConfiguration = FloatingSubtitleWindowConfiguration(window: panel)
-        panel.title = "浮动字幕"
+        panel.title = "悬浮字幕"
         panel.identifier = NSUserInterfaceItemIdentifier(Self.frameAutosaveName)
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
@@ -199,7 +249,7 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         panel.isRestorable = false
         panel.appearance = NSAppearance(named: .darkAqua)
 
-        let host = NSHostingView(rootView: AnyView(FloatingSubtitleView(windowController: self)
+        let host = FloatingSubtitleHostingView(rootView: AnyView(FloatingSubtitleView(windowController: self)
             .environmentObject(model).defaultAppStorage(defaults)))
         panel.contentView = host
         host.layoutSubtreeIfNeeded()
@@ -224,13 +274,26 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         // Restore the old top-left position, keeping the content's fixed size.
         panel.setContentSize(size)
         window = panel
+        settings.alarmIsPresented = model.alarmBanner != nil
+        alarmBannerSubscription = model.$alarmBanner
+            .map { $0.map { $0.title + "|" + ($0.failure ?? "") } }
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] banner in
+                let previous = self?.panel?.frame
+                self?.settings.alarmIsPresented = banner != nil
+                self?.applyAlarmInteraction()
+                // Published values arrive before SwiftUI has laid out the new
+                // banner. Keep the existing top edge and refit on the next turn.
+                Task { @MainActor [weak self] in self?.refitForAlarmBanner(previous: previous) }
+            }
         configuration = panelConfiguration
-        configuration?.apply(settings)
+        applyAlarmInteraction()
         keepClearOfMenuBar()
         panel.delegate = self
-        if pendingBottomPlacement {
-            pendingBottomPlacement = false
-            moveToScreenBottom()
+        if let placement = pendingPlacement {
+            pendingPlacement = nil
+            move(to: placement)
         }
         return panel
     }
@@ -241,14 +304,42 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         #if DEBUG
         if let panelFactoryForTesting { return panelFactoryForTesting(rect, style) }
         #endif
-        return NSPanel(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
+        return FloatingSubtitlePanel(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
+    }
+
+    private func applyAlarmInteraction() {
+        let wasInteractive = panel?.becomesKeyOnlyIfNeeded == false
+        configuration?.apply(settings)
+        panel?.becomesKeyOnlyIfNeeded = !settings.alarmIsPresented
+        (panel as? FloatingSubtitlePanel)?.alarmIsPresented = settings.alarmIsPresented
+        (panel?.contentView as? FloatingSubtitleHostingView)?.alarmIsPresented = settings.alarmIsPresented
+        if wasInteractive, !settings.alarmIsPresented, let panel {
+            focus.returnKeyboardFocus(from: panel)
+        }
+    }
+
+    private func refitForAlarmBanner(previous: NSRect? = nil) {
+        guard let panel, let host = panel.contentView else { return }
+        let previous = previous ?? panel.frame
+        panel.contentMinSize = .zero
+        panel.contentMaxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        host.invalidateIntrinsicContentSize()
+        host.layoutSubtreeIfNeeded()
+        let size = host.fittingSize
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return }
+        panel.setContentSize(size)
+        panel.contentMinSize = size; panel.contentMaxSize = size
+        let frame = FloatingSubtitleWindowPlacement.resizedFrame(previous: previous, size: panel.frame.size,
+            visibleFrame: screens.visibleFrame(for: panel))
+        panel.setFrameOrigin(frame.origin)
+        keepClearOfMenuBar()
     }
 
     func show(model: AppModel) {
         let panel = prepareWindow(model: model)
         if panel.isMiniaturized { panel.deminiaturize(nil) }
         panel.orderFront(nil)
-        isVisible = true
+        updateVisibility()
         configuration?.apply(settings)
     }
 
@@ -256,6 +347,13 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         panel?.orderOut(nil)
         isVisible = false
         configuration?.apply(settings)
+    }
+
+    /// Follow AppKit's current visibility, including minimization and app hide.
+    /// If ⌘H made it invisible, this orders it front without activating the app;
+    /// AppKit still owns whether a hidden application can display its windows.
+    func toggle(model: AppModel) {
+        if isVisible { hide() } else { show(model: model) }
     }
 
     override func close() {
@@ -275,7 +373,8 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         settings = FloatingSubtitleWindowSettings(showsAcrossSpaces: showsAcrossSpaces,
                                                   isLocked: isLocked, backgroundOpacity: backgroundOpacity,
                                                   fullScreenClassMode: settings.fullScreenClassMode,
-                                                  popupIsOpen: settings.popupIsOpen)
+                                                  popupIsOpen: settings.popupIsOpen,
+                                                  alarmIsPresented: settings.alarmIsPresented)
         configuration?.apply(settings)
     }
 
@@ -296,13 +395,15 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         isVisible = false
         isLocked = false
         settings = FloatingSubtitleWindowSettings()
-        pendingBottomPlacement = false
+        pendingPlacement = nil
     }
 
     @objc private func applicationVisibilityChanged(_ notification: Notification) {
         // Never order a closed panel front on unhide. AppKit handles visibility;
         // our owned policy stays identical before and after either notification.
         configuration?.apply(settings)
+        applicationHidden = notification.name == NSApplication.didHideNotification
+        updateVisibility()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -314,6 +415,7 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         // The hosted view observes this controller. Release that content when
         // closing to break the controller -> panel -> view -> controller cycle.
         // Reopening creates a panel at the saved frame with the same runtime lock.
+        alarmBannerSubscription?.cancel(); alarmBannerSubscription = nil
         panel?.contentView = nil
         configuration = nil
         window = nil
@@ -321,9 +423,13 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     func windowDidMove(_ notification: Notification) { keepClearOfMenuBar(); saveFrame() }
     func windowDidResize(_ notification: Notification) { keepClearOfMenuBar(); saveFrame() }
     func windowDidMiniaturize(_ notification: Notification) { isVisible = false }
-    func windowDidDeminiaturize(_ notification: Notification) { isVisible = true }
+    func windowDidDeminiaturize(_ notification: Notification) { updateVisibility() }
     func windowDidChangeOcclusionState(_ notification: Notification) {
-        isVisible = panel?.isVisible == true && panel?.isMiniaturized == false
+        updateVisibility()
+    }
+
+    private func updateVisibility() {
+        isVisible = !applicationHidden && panel?.isVisible == true && panel?.isMiniaturized == false
     }
 
     private func saveFrame() {
@@ -340,14 +446,38 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     }
 
     func moveToScreenBottom() {
+        move(to: .bottom)
+    }
+
+    func moveToScreenTop() {
+        move(to: .top)
+    }
+
+    private func move(to placement: Placement) {
         guard let panel else {
-            pendingBottomPlacement = true
+            pendingPlacement = placement
             return
         }
         guard let visibleFrame = screens.visibleFrame(for: panel) else { return }
-        panel.setFrame(FloatingSubtitleWindowPlacement.bottomFrame(windowSize: panel.frame.size,
-                                                                   visibleFrame: visibleFrame), display: false)
+        let frame = placement == .top
+            ? FloatingSubtitleWindowPlacement.topFrame(windowSize: panel.frame.size, visibleFrame: visibleFrame)
+            : FloatingSubtitleWindowPlacement.bottomFrame(windowSize: panel.frame.size, visibleFrame: visibleFrame)
+        panel.setFrame(frame, display: false)
+        keepClearOfMenuBar()
         saveFrame()
     }
+}
+
+private final class FloatingSubtitleHostingView: NSHostingView<AnyView> {
+    var alarmIsPresented = false
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        alarmIsPresented || super.acceptsFirstMouse(for: event)
+    }
+}
+
+private final class FloatingSubtitlePanel: NSPanel {
+    var alarmIsPresented = false
+    override var canBecomeKey: Bool { alarmIsPresented || super.canBecomeKey }
+    override var canBecomeMain: Bool { false }
 }
 #endif

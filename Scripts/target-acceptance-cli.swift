@@ -304,6 +304,9 @@ struct TargetAcceptanceCLI {
         for (key, model) in models {
             prompts["caption-\(key)"] = try await captionPrompt(model: model, target: target)
             prompts["caption-content-repair-\(key)"] = try await captionPrompt(model: model, attempt: .repairContent, target: target)
+            if target == .simplifiedChinese {
+                prompts["caption-quotation-repair-\(key)"] = try await captionPrompt(model: model, attempt: .repairQuotedContent, target: target)
+            }
             prompts["caption-adjacent-repair-\(key)"] = try await captionPrompt(model: model, previous: true, target: target)
             prompts["typed-\(key)"] = try await captionPrompt(model: model, typed: true, target: target)
         }

@@ -8,6 +8,166 @@ import XCTest
 /// injected. The only native windows created here are never ordered onscreen.
 @MainActor
 final class FullScreenClassModeTests: XCTestCase {
+    func testMenuBarIconDefaultsOffAndNormalModePreferenceInstallsWithoutActivation() throws {
+        let fresh = try FSCFixture(testCase: self)
+        XCTAssertFalse(fresh.controller.menuBarIconEnabled)
+        XCTAssertNil(fresh.defaults.object(forKey: FullScreenClassModeController.menuBarIconPreferenceKey))
+        fresh.controller.start()
+        XCTAssertEqual(fresh.status.installCount, 0)
+        let f = try FSCFixture(testCase: self, menuBarIcon: true)
+        f.controller.start()
+        XCTAssertTrue(f.controller.menuBarIconEnabled)
+        XCTAssertFalse(f.controller.isEnabled)
+        XCTAssertEqual(f.status.installCount, 1)
+        XCTAssertTrue(f.application.policies.isEmpty)
+        XCTAssertEqual(f.status.appearance?.accessibilityLabel, "LiveLingo，未记录")
+        XCTAssertEqual(try item(.disableMode, in: f).title, "开启全屏网课模式")
+        try dispatch(.disableMode, in: f)
+        XCTAssertTrue(f.controller.isEnabled)
+        XCTAssertEqual(try item(.disableMode, in: f).title, "关闭全屏网课模式")
+        try dispatch(.disableMode, in: f)
+        XCTAssertFalse(f.controller.isEnabled)
+        XCTAssertEqual(f.status.installCount, 1)
+        XCTAssertEqual(f.status.removeCount, 0)
+        XCTAssertEqual(f.status.appearance?.accessibilityLabel, "LiveLingo，未记录")
+    }
+
+    func testMenuBarPreferenceBindingIsForcedOnOnlyDuringClassMode() throws {
+        let f = try FSCFixture(testCase: self)
+        f.controller.setMenuBarIconEnabled(true)
+        XCTAssertTrue(f.controller.menuBarIconBinding.wrappedValue)
+        XCTAssertTrue(f.defaults.bool(forKey: FullScreenClassModeController.menuBarIconPreferenceKey))
+        f.controller.setMenuBarIconEnabled(false)
+        XCTAssertFalse(f.controller.menuBarIconBinding.wrappedValue)
+        f.controller.setEnabled(true)
+        XCTAssertTrue(f.controller.menuBarIconBinding.wrappedValue)
+        XCTAssertFalse(f.controller.menuBarIconEnabled)
+        XCTAssertFalse(f.defaults.bool(forKey: FullScreenClassModeController.menuBarIconPreferenceKey))
+        f.controller.setEnabled(false)
+        XCTAssertFalse(f.controller.menuBarIconBinding.wrappedValue)
+        XCTAssertEqual(f.status.removeCount, 2)
+    }
+
+    func testMenuBarInstallFailureDoesNotPersistPreferenceAndExistingIconSurvivesPolicyFailure() throws {
+        let f = try FSCFixture(testCase: self)
+        f.status.installSucceeds = false
+        f.controller.setMenuBarIconEnabled(true)
+        XCTAssertFalse(f.controller.menuBarIconEnabled)
+        XCTAssertNil(f.defaults.object(forKey: FullScreenClassModeController.menuBarIconPreferenceKey))
+        f.status.installSucceeds = true
+        f.controller.setMenuBarIconEnabled(true)
+        f.application.rejectedPolicy = .accessory
+        f.controller.setEnabled(true)
+        XCTAssertFalse(f.controller.isEnabled)
+        XCTAssertTrue(f.controller.menuBarIconEnabled)
+        XCTAssertEqual(f.status.removeCount, 0)
+    }
+
+    func testUnlockHintAvailabilityTracksSuccessfulStatusInstallationAndRemoval() throws {
+        let f = try FSCFixture(testCase: self, menuBarIcon: true)
+        XCTAssertTrue(f.controller.menuBarIconEnabled)
+        XCTAssertFalse(f.controller.statusInstalled, "A saved preference alone does not install the icon")
+        f.status.installSucceeds = false
+        f.controller.start()
+        XCTAssertFalse(f.controller.statusInstalled)
+        f.status.installSucceeds = true
+        f.controller.setMenuBarIconEnabled(true)
+        XCTAssertTrue(f.controller.statusInstalled)
+        f.controller.setEnabled(true)
+        f.controller.setMenuBarIconEnabled(false)
+        XCTAssertTrue(f.controller.statusInstalled, "Class mode still owns the icon")
+        f.controller.setEnabled(false)
+        XCTAssertFalse(f.controller.statusInstalled)
+        f.controller.setMenuBarIconEnabled(true)
+        XCTAssertTrue(f.controller.statusInstalled)
+        f.controller.shutdown()
+        XCTAssertFalse(f.controller.statusInstalled)
+    }
+
+    func testUnlockHintsTrackModeAndIconChangesInMountedSettingsAndFloatingBadge() async throws {
+        let f = try FSCFixture(testCase: self)
+        let app = NSApplication.shared
+        let previous = app.value(forKey: "accessibilityEnhancedUserInterface")
+        app.setValue(true, forKey: "accessibilityEnhancedUserInterface")
+        defer { app.setValue(previous, forKey: "accessibilityEnhancedUserInterface") }
+        let floating = FloatingSubtitleWindowController(defaults: f.defaults)
+        floating.toggleLock()
+        defer { floating.shutdown() }
+        let settings = NSHostingView(rootView: ClassroomSettingsView(fullScreenMode: f.controller)
+            .environmentObject(f.model).defaultAppStorage(f.defaults))
+        let badge = NSHostingView(rootView: FloatingSubtitleView(windowController: floating, classModeController: f.controller)
+            .environmentObject(f.model).defaultAppStorage(f.defaults))
+        let settingsWindow = hiddenWindow(size: NSSize(width: 520, height: 1500))
+        let badgeWindow = hiddenWindow(size: NSSize(width: 640, height: 350))
+        settingsWindow.contentView = settings
+        badgeWindow.contentView = badge
+        defer { settingsWindow.close(); badgeWindow.close() }
+
+        func strings(in view: NSView) -> [String] {
+            var visited = Set<ObjectIdentifier>()
+            func walk(_ object: NSObject, depth: Int = 0) -> [String] {
+                guard depth < 30, visited.insert(ObjectIdentifier(object)).inserted else { return [] }
+                let text = ["accessibilityValue", "accessibilityLabel", "accessibilityHelp"].compactMap { key -> String? in
+                    object.responds(to: NSSelectorFromString(key)) ? object.value(forKey: key) as? String : nil
+                }
+                guard object.responds(to: NSSelectorFromString("accessibilityChildren")) else { return text }
+                return text + ((object.value(forKey: "accessibilityChildren") as? [NSObject]) ?? [])
+                    .flatMap { walk($0, depth: depth + 1) }
+            }
+            return walk(view)
+        }
+        func assertHints(_ controls: String, fullScreen: Bool = false,
+                         file: StaticString = #filePath, line: UInt = #line) async throws {
+            try await settle(settings)
+            try await settle(badge)
+            let suffix = "解锁（⇧⌘L，仅 LiveLingo 在前台时有效）"
+            let settingsText = strings(in: settings)
+            let badgeText = strings(in: badge)
+            XCTAssertTrue(settingsText.contains("可在\(controls)\(suffix)。"), file: file, line: line)
+            XCTAssertTrue(badgeText.contains("字幕窗已锁定，点击穿透；可用\(controls)\(suffix)"), file: file, line: line)
+            if fullScreen {
+                XCTAssertFalse((settingsText + badgeText).contains { $0.contains("“录音”菜单") }, file: file, line: line)
+            }
+            XCTAssertFalse(settingsWindow.isVisible, file: file, line: line)
+            XCTAssertFalse(badgeWindow.isVisible, file: file, line: line)
+        }
+        try await assertHints("主窗口或“录音”菜单")
+        f.controller.setMenuBarIconEnabled(true)
+        try await assertHints("菜单栏图标、主窗口或“录音”菜单")
+        f.controller.setEnabled(true)
+        try await assertHints("菜单栏图标或主窗口", fullScreen: true)
+        f.controller.setMenuBarIconEnabled(false)
+        try await assertHints("菜单栏图标或主窗口", fullScreen: true)
+        f.controller.setEnabled(false)
+        try await assertHints("主窗口或“录音”菜单")
+    }
+
+    func testDisplayModeSubmenuWritesInjectedStoreAndMoveTopRoutesToPanel() throws {
+        let f = try FSCFixture(testCase: self, menuBarIcon: true)
+        f.controller.start()
+        for mode in FloatingSubtitleDisplayMode.allCases {
+            let choice = try XCTUnwrap(f.controller.displayModeItem(for: mode))
+            XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(choice.action), to: choice.target, from: choice))
+            XCTAssertEqual(f.defaults.string(forKey: "floatingDisplayMode"), mode.rawValue)
+            for current in FloatingSubtitleDisplayMode.allCases {
+                XCTAssertEqual(f.controller.displayModeItem(for: current)?.state, current == mode ? .on : .off)
+            }
+        }
+        try dispatch(.moveSubtitlesToTop, in: f)
+        XCTAssertEqual(f.subtitles.moveTopCount, 1)
+        XCTAssertTrue(f.subtitles.shownModel === f.model)
+    }
+
+    func testLiveSubtitleBridgeUsesExplicitStoreRatherThanModelStore() throws {
+        let f = try FSCFixture(testCase: self)
+        let panelController = FloatingSubtitleWindowController(defaults: f.defaults)
+        let bridge = LiveFullScreenSubtitles(controller: panelController, defaults: f.defaults)
+        bridge.setDisplayMode(.sourceOnly)
+        XCTAssertEqual(bridge.displayMode, .sourceOnly)
+        XCTAssertEqual(f.defaults.string(forKey: "floatingDisplayMode"), "sourceOnly")
+        XCTAssertNil(panelController.window)
+    }
+
     func testDestroyedNativePopupsReleaseProtectionWithoutCloseNotifications() throws {
         for isPopover in [false, true] {
             let f = try FSCFixture(testCase: self)
@@ -230,7 +390,7 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertEqual(f.status.installCount, 0)
         XCTAssertTrue(f.subtitles.modeChanges.isEmpty)
         XCTAssertEqual(f.scheduler.pendingCount, 0)
-        XCTAssertFalse(try item(.disableMode, in: f).isEnabled)
+        XCTAssertTrue(try item(.disableMode, in: f).isEnabled)
         XCTAssertEqual(f.model.phase, .idle)
     }
 
@@ -341,7 +501,7 @@ final class FullScreenClassModeTests: XCTestCase {
         f.controller.setEnabled(false)
         XCTAssertTrue(f.subtitles.isLocked)
         XCTAssertTrue(f.subtitles.surface.ignoresMouseEvents)
-        XCTAssertEqual(try item(.toggleLock, in: f).title, "解锁浮动字幕")
+        XCTAssertEqual(try item(.toggleLock, in: f).title, "锁定悬浮字幕")
         f.subtitles.setLockedExternally(false)
         f.scheduler.drain()
         XCTAssertFalse(f.subtitles.surface.ignoresMouseEvents)
@@ -634,13 +794,13 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertFalse(window.isVisible)
     }
 
-    func testMenuHasSevenIdentifiedActionsAndCorrectRecordingPausedAndLockStates() throws {
+    func testMenuHasTenIdentifiedActionsAndCorrectRecordingPausedAndLockStates() throws {
         let f = try FSCFixture(testCase: self)
-        let actions = f.controller.menu.items.filter { !$0.isSeparatorItem }
-        XCTAssertEqual(actions.count, 7)
+        let actions = f.controller.menu.items.filter { $0.action != nil }
+        XCTAssertEqual(actions.count, 10)
         XCTAssertEqual(actions.compactMap { $0.identifier?.rawValue }, FullScreenMenuAction.allCases.map(\.rawValue))
-        XCTAssertEqual(actions.map(\.title), ["显示主窗口", "显示浮动字幕", "锁定浮动字幕",
-            "浮动字幕移到屏幕底部", "开始记录", "关闭全屏网课模式", "退出 LiveLingo"])
+        XCTAssertEqual(actions.map(\.title), ["显示主窗口", "显示悬浮字幕", "锁定悬浮字幕", "悬浮字幕显示",
+            "悬浮字幕移到屏幕底部", "悬浮字幕移到屏幕顶部", "暂停记录", "开始记录", "开启全屏网课模式", "退出 LiveLingo"])
         XCTAssertFalse(f.controller.menu.autoenablesItems)
         XCTAssertEqual(try item(.toggleSubtitles, in: f).state, .off)
         XCTAssertEqual(try item(.toggleLock, in: f).state, .off)
@@ -654,9 +814,11 @@ final class FullScreenClassModeTests: XCTestCase {
             f.controller.refresh()
             XCTAssertEqual(try item(.toggleRecording, in: f).title, "停止并保存")
             XCTAssertTrue(try item(.toggleRecording, in: f).isEnabled)
-            XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "隐藏浮动字幕")
+            XCTAssertEqual(try item(.togglePause, in: f).title, paused ? "继续记录" : "暂停记录")
+            XCTAssertTrue(try item(.togglePause, in: f).isEnabled)
+            XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "显示悬浮字幕")
             XCTAssertEqual(try item(.toggleSubtitles, in: f).state, .on)
-            XCTAssertEqual(try item(.toggleLock, in: f).title, paused ? "解锁浮动字幕" : "锁定浮动字幕")
+            XCTAssertEqual(try item(.toggleLock, in: f).title, "锁定悬浮字幕")
             XCTAssertEqual(try item(.toggleLock, in: f).state, paused ? .on : .off)
             let appearance = try XCTUnwrap(f.status.appearance)
             XCTAssertEqual(appearance, FullScreenStatusAppearance(hasActiveSession: true, isPaused: paused))
@@ -665,7 +827,50 @@ final class FullScreenClassModeTests: XCTestCase {
         }
     }
 
-    func testNativeMenuActionAndTargetRouteAllSevenCommandsToFakes() throws {
+    func testSubtitleMenuTitlesStayFixedWhileCheckmarksFollowIndependentStates() throws {
+        let f = try FSCFixture(testCase: self)
+        for visible in [false, true] {
+            for locked in [false, true] {
+                f.subtitles.setVisibleExternally(visible)
+                f.subtitles.setLockedExternally(locked)
+                f.scheduler.drain()
+                XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "显示悬浮字幕")
+                XCTAssertEqual(try item(.toggleSubtitles, in: f).state, visible ? .on : .off)
+                XCTAssertEqual(try item(.toggleLock, in: f).title, "锁定悬浮字幕")
+                XCTAssertEqual(try item(.toggleLock, in: f).state, locked ? .on : .off)
+            }
+        }
+    }
+
+    func testRecordingStatusRowIsDisabledAndRecordingControlsAreSeparated() throws {
+        let f = try FSCFixture(testCase: self)
+        let status = try XCTUnwrap(f.controller.menu.items.first)
+        XCTAssertEqual(status.identifier?.rawValue, "recordingStatus")
+        XCTAssertNil(status.action)
+        XCTAssertNil(status.target)
+        XCTAssertNil(status.representedObject)
+        XCTAssertTrue(f.controller.menu.items[1].isSeparatorItem)
+        for action in [FullScreenMenuAction.togglePause, .toggleRecording, .disableMode] {
+            let nativeItem = try item(action, in: f)
+            let index = f.controller.menu.index(of: nativeItem)
+            XCTAssertGreaterThan(index, 0)
+            XCTAssertTrue(f.controller.menu.items[index - 1].isSeparatorItem)
+        }
+        let states: [(FullScreenRecordingState, String)] = [
+            (.init(), "● 未记录"),
+            (.init(hasActiveSession: true), "● 正在记录"),
+            (.init(hasActiveSession: true, isPaused: true), "● 记录已暂停")
+        ]
+        for (state, title) in states {
+            f.recording.state = state
+            f.controller.refresh()
+            XCTAssertEqual(status.title, title)
+            XCTAssertFalse(status.isEnabled)
+            XCTAssertEqual(status.state, .off)
+        }
+    }
+
+    func testNativeMenuActionAndTargetRouteAllEightCommandsToFakes() throws {
         let f = try FSCFixture(testCase: self)
         f.recording.state.canToggle = true
         f.controller.setEnabled(true)
@@ -687,6 +892,11 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertTrue(f.subtitles.isLocked)
         try dispatch(.toggleRecording, in: f)
         XCTAssertEqual(f.recording.toggleCount, 1)
+        f.recording.state.hasActiveSession = true
+        f.controller.refresh()
+        try dispatch(.togglePause, in: f)
+        XCTAssertEqual(f.recording.togglePauseCount, 1)
+        XCTAssertTrue(f.recording.state.isPaused)
         XCTAssertEqual(f.model.phase, .idle, "A menu command must never invoke live AppModel recording")
         try dispatch(.disableMode, in: f)
         XCTAssertFalse(f.controller.isEnabled)
@@ -705,19 +915,46 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertEqual(f.model.phase, .idle)
     }
 
+    func testPauseActionTracksSessionStateAndCannotInvokeCommandsWhileIdle() throws {
+        let f = try FSCFixture(testCase: self)
+        f.recording.state.canToggle = true
+        f.controller.refresh()
+        XCTAssertFalse(try item(.togglePause, in: f).isEnabled)
+        XCTAssertEqual(try item(.togglePause, in: f).title, "暂停记录")
+        try dispatch(.togglePause, in: f)
+        XCTAssertEqual(f.recording.togglePauseCount, 0)
+        for paused in [false, true] {
+            f.recording.state = .init(hasActiveSession: true, isPaused: paused, canToggle: false)
+            f.controller.refresh()
+            XCTAssertTrue(try item(.togglePause, in: f).isEnabled)
+            XCTAssertEqual(try item(.togglePause, in: f).title, paused ? "继续记录" : "暂停记录")
+            let count = f.recording.togglePauseCount
+            try dispatch(.togglePause, in: f)
+            XCTAssertEqual(f.recording.togglePauseCount, count + 1)
+            XCTAssertEqual(f.recording.state.isPaused, !paused)
+            XCTAssertEqual(try item(.togglePause, in: f).title, paused ? "暂停记录" : "继续记录")
+        }
+        f.recording.state.hasActiveSession = false
+        // A stale enabled item must also respect the latest state at dispatch.
+        try dispatch(.togglePause, in: f)
+        XCTAssertEqual(f.recording.togglePauseCount, 2)
+        XCTAssertFalse(try item(.togglePause, in: f).isEnabled)
+        XCTAssertEqual(f.model.phase, .idle, "Pause commands must use the injected fake")
+    }
+
     func testExternalSubtitleChangesRefreshMenuWithoutManualRefresh() throws {
         let f = try FSCFixture(testCase: self)
         f.controller.setEnabled(true)
         f.scheduler.drain()
         f.subtitles.setVisibleExternally(true)
-        XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "显示浮动字幕",
+        XCTAssertEqual(try item(.toggleSubtitles, in: f).state, .off,
                        "The publisher fires before mutation; refresh must be scheduled")
         f.scheduler.drain()
-        XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "隐藏浮动字幕")
+        XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "显示悬浮字幕")
         XCTAssertEqual(try item(.toggleSubtitles, in: f).state, .on)
         f.subtitles.setLockedExternally(true)
         f.scheduler.drain()
-        XCTAssertEqual(try item(.toggleLock, in: f).title, "解锁浮动字幕")
+        XCTAssertEqual(try item(.toggleLock, in: f).title, "锁定悬浮字幕")
         XCTAssertEqual(try item(.toggleLock, in: f).state, .on)
         f.subtitles.setVisibleExternally(false)
         f.subtitles.setLockedExternally(false)
@@ -733,7 +970,7 @@ final class FullScreenClassModeTests: XCTestCase {
         f.controller.connect(model: model, recording: FullScreenRecordingCommands(state: {
             FullScreenRecordingState(hasActiveSession: model.hasActiveSession, isPaused: model.isPaused,
                 actionTitle: model.hasActiveSession ? model.stopRecordingTitle : "开始记录", canToggle: true)
-        }, toggle: { recording.toggleCount += 1 }))
+        }, toggle: { recording.toggleCount += 1 }, togglePause: { recording.togglePauseCount += 1 }))
         f.controller.setEnabled(true)
         f.scheduler.drain()
         XCTAssertEqual(try item(.toggleRecording, in: f).title, "开始记录")
@@ -742,10 +979,15 @@ final class FullScreenClassModeTests: XCTestCase {
             f.scheduler.drain()
             XCTAssertEqual(try item(.toggleRecording, in: f).title,
                            model.hasActiveSession ? model.stopRecordingTitle : "开始记录")
+            XCTAssertEqual(try item(.togglePause, in: f).title, model.isPaused ? "继续记录" : "暂停记录")
+            XCTAssertEqual(try item(.togglePause, in: f).isEnabled, model.hasActiveSession)
+            XCTAssertEqual(f.controller.menu.items.first?.title,
+                           model.hasActiveSession ? (model.isPaused ? "● 记录已暂停" : "● 正在记录") : "● 未记录")
             XCTAssertEqual(f.status.appearance,
                 FullScreenStatusAppearance(hasActiveSession: model.hasActiveSession, isPaused: model.isPaused))
         }
         XCTAssertEqual(recording.toggleCount, 0)
+        XCTAssertEqual(recording.togglePauseCount, 0)
         XCTAssertEqual(model.phase, .idle)
     }
 
@@ -766,6 +1008,11 @@ final class FullScreenClassModeTests: XCTestCase {
 
     func testSettingsPageRendersOffscreenWithTheInjectedController() async throws {
         let f = try FSCFixture(testCase: self)
+        f.defaults.set(false, forKey: "floatingShowsAcrossSpaces")
+        let app = NSApplication.shared
+        let previous = app.value(forKey: "accessibilityEnhancedUserInterface")
+        app.setValue(true, forKey: "accessibilityEnhancedUserInterface")
+        defer { app.setValue(previous, forKey: "accessibilityEnhancedUserInterface") }
         let host = NSHostingView(rootView: AnyView(ClassroomSettingsView(fullScreenMode: f.controller)
             .environmentObject(f.model).defaultAppStorage(f.defaults).environment(\.colorScheme, .light)))
         let window = hiddenWindow(size: NSSize(width: 520, height: 1600))
@@ -774,6 +1021,20 @@ final class FullScreenClassModeTests: XCTestCase {
         defer { window.close() }
         let before = domain(f)
         try await settle(host)
+        func spacesControl() throws -> NSObject {
+            var visited = Set<ObjectIdentifier>()
+            func walk(_ object: NSObject) -> [NSObject] {
+                guard visited.insert(ObjectIdentifier(object)).inserted else { return [] }
+                let children = object.responds(to: NSSelectorFromString("accessibilityChildren"))
+                    ? object.value(forKey: "accessibilityChildren") as? [NSObject] ?? [] : []
+                return [object] + children.flatMap(walk)
+            }
+            return try XCTUnwrap(walk(host).first { object in
+                object.responds(to: NSSelectorFromString("accessibilityIdentifier"))
+                    && object.value(forKey: "accessibilityIdentifier") as? String == "floating-all-spaces"
+            })
+        }
+        XCTAssertEqual(try spacesControl().value(forKey: "accessibilityEnabled") as? Bool, true)
         let off = try bitmap(host)
         try saveScreenshot(off, name: "fullscreen-settings-off", fixture: f)
         XCTAssertTrue(NSDictionary(dictionary: domain(f)).isEqual(to: before),
@@ -781,6 +1042,8 @@ final class FullScreenClassModeTests: XCTestCase {
         f.controller.binding.wrappedValue = true
         f.scheduler.drain()
         try await settle(host)
+        XCTAssertEqual(try spacesControl().value(forKey: "accessibilityEnabled") as? Bool, false)
+        XCTAssertFalse(f.defaults.bool(forKey: "floatingShowsAcrossSpaces"), "Forcing all spaces must preserve the user's stored setting")
         let on = try bitmap(host)
         try saveScreenshot(on, name: "fullscreen-settings-on", fixture: f)
         XCTAssertNotEqual(try pixels(off), try pixels(on), "The actual observed settings toggle must redraw")
@@ -790,6 +1053,10 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertEqual(f.model.phase, .idle)
         XCTAssertFalse(window.isVisible)
         XCTAssertFalse(window.isKeyWindow)
+        f.controller.setEnabled(false)
+        try await settle(host)
+        XCTAssertEqual(try spacesControl().value(forKey: "accessibilityEnabled") as? Bool, true)
+        XCTAssertFalse(f.defaults.bool(forKey: "floatingShowsAcrossSpaces"))
     }
 
     func testRealMenuItemCellsRenderIdleRecordingAndPausedLockedStatesOffscreen() async throws {
@@ -809,6 +1076,11 @@ final class FullScreenClassModeTests: XCTestCase {
             f.scheduler.drain()
             f.controller.refresh()
             let view = FSCNativeMenuView(menu: f.controller.menu)
+            XCTAssertEqual(f.controller.menu.items.first?.title,
+                           "● \(FullScreenStatusAppearance(hasActiveSession: state.hasActiveSession, isPaused: state.isPaused).stateTitle)")
+            XCTAssertFalse(try XCTUnwrap(f.controller.menu.items.first).isEnabled)
+            XCTAssertEqual(try item(.togglePause, in: f).title, state.isPaused ? "继续记录" : "暂停记录")
+            XCTAssertEqual(try item(.togglePause, in: f).isEnabled, state.hasActiveSession)
             XCTAssertEqual(view.cells.count, f.controller.menu.items.count)
             for (cell, actualItem) in zip(view.cells, f.controller.menu.items) {
                 XCTAssertTrue(cell.menuItem === actualItem, "Render the controller's real native item, not copied text")
@@ -829,6 +1101,7 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertNotEqual(captures[0], captures[1])
         XCTAssertNotEqual(captures[1], captures[2])
         XCTAssertEqual(f.recording.toggleCount, 0)
+        XCTAssertEqual(f.recording.togglePauseCount, 0)
         XCTAssertTrue(f.subtitles.menuTrackingChanges.isEmpty, "Offscreen cells must not open a real menu")
     }
 
@@ -1498,7 +1771,7 @@ private final class FSCFixture {
     let notifications = NotificationCenter()
     let popupLifetimeChecks = PassthroughSubject<Void, Never>()
 
-    init(testCase: XCTestCase, savedEnabled: Bool? = nil,
+    init(testCase: XCTestCase, savedEnabled: Bool? = nil, menuBarIcon: Bool = false,
          policy: NSApplication.ActivationPolicy = .regular) throws {
         let base = try FloatingSubtitleWindowTestFixture(testCase: testCase)
         model = base.model
@@ -1510,11 +1783,12 @@ private final class FSCFixture {
         let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         testCase.addTeardownBlock { try cleanup.remove() }
         if let savedEnabled { defaults.set(savedEnabled, forKey: FullScreenClassModeController.preferenceKey) }
+        if menuBarIcon { defaults.set(true, forKey: FullScreenClassModeController.menuBarIconPreferenceKey) }
         self.suite = suite
         self.defaults = defaults
         let application = FSCApplication(policy: policy)
         let status = FSCStatusItem()
-        let subtitles = FSCSubtitles()
+        let subtitles = FSCSubtitles(defaults: defaults)
         let recording = FSCRecording()
         let scheduler = FSCScheduler()
         let controller = FullScreenClassModeController(defaults: defaults, application: application,
@@ -1617,8 +1891,12 @@ private final class FSCStatusItem: FullScreenStatusItemPresenting {
 private final class FSCRecording {
     var state = FullScreenRecordingState()
     var toggleCount = 0
+    var togglePauseCount = 0
     var commands: FullScreenRecordingCommands {
-        FullScreenRecordingCommands(state: { self.state }, toggle: { self.toggleCount += 1 })
+        FullScreenRecordingCommands(state: { self.state }, toggle: { self.toggleCount += 1 }, togglePause: {
+            self.togglePauseCount += 1
+            self.state.isPaused.toggle()
+        })
     }
 }
 
@@ -1659,6 +1937,16 @@ private struct FSCWindowValues {
 
 @MainActor
 private final class FSCSubtitles: FullScreenSubtitleControlling {
+    private let defaults: UserDefaults?
+    private var selectedDisplayMode: FloatingSubtitleDisplayMode = .bilingual
+    var displayMode: FloatingSubtitleDisplayMode {
+        defaults.map { FloatingSubtitlePreferences(store: $0).displayMode } ?? selectedDisplayMode
+    }
+    func setDisplayMode(_ mode: FloatingSubtitleDisplayMode) {
+        selectedDisplayMode = mode
+        if let defaults { FloatingSubtitlePreferences(store: defaults).displayMode = mode }
+        changes.send(())
+    }
     let surface = FSCSurface()
     let original: FSCWindowValues
     private let configuration: FloatingSubtitleWindowConfiguration
@@ -1671,9 +1959,11 @@ private final class FSCSubtitles: FullScreenSubtitleControlling {
     private(set) var menuTrackingChanges: [Bool] = []
     private(set) var hideCount = 0
     private(set) var moveCount = 0
+    private(set) var moveTopCount = 0
     private(set) var shutdownCount = 0
     private(set) weak var shownModel: AppModel?
-    init() {
+    init(defaults: UserDefaults? = nil) {
+        self.defaults = defaults
         original = FSCWindowValues(surface)
         configuration = FloatingSubtitleWindowConfiguration(window: surface)
     }
@@ -1691,6 +1981,7 @@ private final class FSCSubtitles: FullScreenSubtitleControlling {
     func hide() { hideCount += 1; setVisibleExternally(false) }
     func toggleLock() { setLockedExternally(!isLocked) }
     func moveToScreenBottom() { moveCount += 1 }
+    func moveToScreenTop() { moveTopCount += 1 }
     func shutdown() {
         shutdownCount += 1
         configuration.restore()

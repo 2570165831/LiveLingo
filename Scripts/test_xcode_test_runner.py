@@ -5,6 +5,7 @@ from contextlib import ExitStack
 import importlib.util
 import io
 import json
+import plistlib
 from pathlib import Path
 import signal
 import subprocess
@@ -215,11 +216,8 @@ class RunnerHarness:
             "os": self.os,
             "subprocess": self.subprocess,
             "processes": Mock(side_effect=self.process_table),
-            "preference_events": Mock(return_value=([
-                "TEST_PREFERENCE_CREATED suite=LiveLingo-Test-00000000-0000-0000-0000-000000000001\n",
-                "TEST_PREFERENCE_CLEANED suite=LiveLingo-Test-00000000-0000-0000-0000-000000000001\n",
-            ], ["synthetic preference audit"])),
-            "retire_workers": Mock(return_value=["worker-810001-synthetic"]),
+            "preference_events": Mock(side_effect=self.preference_audit),
+            "retire_workers": Mock(side_effect=self.remove_workers),
             "sandboxed_host": Mock(side_effect=lambda app: self.sandboxed),
             "trash_entries": Mock(side_effect=self.trash_listing),
             "threading": SimpleNamespace(Thread=self.make_reader),
@@ -264,6 +262,9 @@ class RunnerHarness:
 
     def open(self, path, mode="r", buffering=-1, encoding=None,
              errors=None, newline=None):
+        if path == REPO / 'LiveLingo/Resources/Info.plist':
+            self.case.assertEqual(mode, 'rb', 'The production plist is read-only')
+            return self.real_open(path, mode=mode)
         if path == self.dd / ".test-run.lock":
             self.case.assertEqual(mode, "a")
             stream = io.StringIO()
@@ -338,13 +339,31 @@ class RunnerHarness:
         self.case.assertEqual(command[0], "/synthetic/python")
         self.case.assertIn(Path(command[1]).name,
                            ("check_build_warnings.py", "check_test_preferences.py"))
-        filename = "synthetic-preferences.log" if Path(command[1]).name == "check_test_preferences.py" else "synthetic.log"
+        name = Path(self.command[self.command.index("-resultBundlePath") + 1]).stem
+        filename = name + ("-preferences.log" if Path(command[1]).name == "check_test_preferences.py" else ".log")
         self.case.assertEqual(command[2], str(self.output / filename))
         self.guard_commands.append(command)
         return SimpleNamespace(stdout=FAILURE_OUTPUT, returncode=self.guard_exit_code)
 
+    def preference_audit(self, scratch, host_pids, previous_workers, *,
+                         allow_empty=False, audited_workers=None):
+        if audited_workers is not None:
+            audited_workers[self.dd / "tmp/worker-810001-synthetic"] = (7, 11)
+        return ([
+            "TEST_PREFERENCE_CREATED suite=LiveLingo-Test-00000000-0000-0000-0000-000000000001\n",
+            "TEST_PREFERENCE_CLEANED suite=LiveLingo-Test-00000000-0000-0000-0000-000000000001\n",
+        ], ["synthetic preference audit"])
+
+    def remove_workers(self, scratch, host_pids, previous_workers, audited_workers,
+                       *, removed_workers):
+        self.case.assertEqual(audited_workers,
+                             {self.dd / "tmp/worker-810001-synthetic": (7, 11)})
+        removed_workers.append("worker-810001-synthetic")
+        return removed_workers
+
     def receipt(self):
-        return json.loads((self.output / "synthetic.json").read_text(encoding="utf-8"))
+        name = Path(self.command[self.command.index("-resultBundlePath") + 1]).stem
+        return json.loads((self.output / (name + ".json")).read_text(encoding="utf-8"))
 
     def assert_filtered_writes(self):
         self.case.assertTrue(self.writes)
@@ -566,11 +585,13 @@ class RunnerEvidenceTests(unittest.TestCase):
                              FILTERED_FAILURE + FILTERED_FAILURE + "\n")
             harness.assert_filtered_writes()
 
-    def test_duplicate_log_name_preserves_all_existing_evidence_before_launch(self):
+    def test_duplicate_name_uses_a_new_stem_and_preserves_all_existing_evidence(self):
         with RunnerHarness(self) as harness:
             filenames = ("synthetic.log", "synthetic.json", "synthetic.pid",
                          f"synthetic-sample-1-pid{RUNNER_PID}.txt",
-                         "synthetic-check_build_warnings.txt")
+                         "synthetic-check_build_warnings.txt", "synthetic-host-info.plist",
+                         "synthetic-preferences.log", "synthetic-check_test_preferences.txt",
+                         "synthetic-2.log")
             for name in filenames:
                 (harness.output / name).write_text("previous synthetic evidence\n")
             old_result = harness.output / "synthetic.xcresult"
@@ -580,15 +601,52 @@ class RunnerEvidenceTests(unittest.TestCase):
             paths = [harness.output / name for name in filenames] + [old_result / "previous.txt"]
             before = {path: path.read_bytes() for path in paths}
             harness.writes.clear()
-            with self.assertRaises(FileExistsError):
-                harness.runner.main()
+            self.assertEqual(harness.runner.main(), 65)
             self.assertEqual({path: path.read_bytes() for path in paths}, before)
-            harness.subprocess.Popen.assert_not_called()
+            harness.subprocess.Popen.assert_called_once()
             harness.subprocess.run.assert_not_called()
             harness.os.kill.assert_not_called()
             harness.os.killpg.assert_not_called()
-            self.assertEqual(harness.writes, {})
+            receipt = harness.receipt()
+            self.assertEqual(receipt["requested_name"], "synthetic")
+            self.assertEqual(receipt["name"], "synthetic-3")
+            self.assertEqual(receipt["log"], str(harness.output / "synthetic-3.log"))
+            self.assertEqual(receipt["xcresult"], str(harness.output / "synthetic-3.xcresult"))
+            self.assertTrue(plistlib.loads((harness.output / "synthetic-3-host-info.plist").read_bytes())["LSUIElement"])
+            self.assertTrue(all(path.name.startswith("synthetic-3") for path in harness.writes))
             self.assertFalse(harness.dd.exists())
+
+    def test_successful_same_name_rerun_keeps_the_first_invocation_evidence(self):
+        with RunnerHarness(self, exit_code=0) as harness:
+            for filename in ("synthetic-unrelated.txt", "synthetic-2-unrelated.txt"):
+                (harness.output / filename).write_text("unrelated synthetic evidence\n")
+            self.assertEqual(harness.runner.main(), 0)
+            self.assertEqual(harness.receipt()["name"], "synthetic")
+            before = {path: path.read_bytes() for path in harness.output.iterdir()}
+            harness.process.stdout.close()
+            harness.process.stdout = io.StringIO(FAILURE_OUTPUT)
+            self.assertEqual(harness.runner.main(), 0)
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+            self.assertEqual(harness.args.name, "synthetic")
+            receipt = harness.receipt()
+            self.assertEqual((receipt["requested_name"], receipt["name"]),
+                             ("synthetic", "synthetic-2"))
+            self.assertEqual(receipt["removed_workers"], ["worker-810001-synthetic"])
+            self.assertEqual(harness.subprocess.Popen.call_count, 2)
+            self.assertEqual(harness.runner.retire_workers.call_count, 2)
+            harness.assert_filtered_writes()
+
+    def test_host_plist_or_result_bundle_alone_reserves_the_old_stem(self):
+        for artifact in ("synthetic-host-info.plist", "synthetic.xcresult"):
+            with self.subTest(artifact=artifact), RunnerHarness(self) as harness:
+                existing = harness.output / artifact
+                if artifact.endswith(".xcresult"):
+                    harness.real_mkdir(existing)
+                    existing = existing / "previous.txt"
+                existing.write_text("previous synthetic evidence\n")
+                self.assertEqual(harness.runner.main(), 65)
+                self.assertEqual(existing.read_text(), "previous synthetic evidence\n")
+                self.assertEqual(harness.receipt()["name"], "synthetic-2")
 
     def test_duplicate_sample_name_does_not_truncate_existing_stack_evidence(self):
         with RunnerHarness(self, timeout=True) as harness:
@@ -599,12 +657,28 @@ class RunnerEvidenceTests(unittest.TestCase):
             self.assertEqual(sample.read_text(), "previous synthetic stack\n")
             self.assertNotIn(sample, harness.writes)
             harness.os.killpg.assert_called_once_with(RUNNER_PID, signal.SIGTERM)
-            self.assertEqual(harness.receipt()["samples"][0]["error"],
-                             "sample evidence already exists")
+            self.assertEqual(harness.receipt()["name"], "synthetic-2")
+            record = harness.receipt()["samples"][0]
+            self.assertNotIn("error", record)
+            self.assertEqual(Path(record["path"]).name,
+                             f"synthetic-2-sample-1-pid{RUNNER_PID}.txt")
             harness.assert_filtered_writes()
 
 
 class GateAndCleanupTests(unittest.TestCase):
+    def test_host_is_background_only_before_launch_and_production_plist_is_unchanged(self):
+        source = REPO / 'LiveLingo/Resources/Info.plist'
+        original = source.read_bytes()
+        self.assertNotIn('LSUIElement', plistlib.loads(original))
+        with RunnerHarness(self, exit_code=0) as harness:
+            self.assertEqual(harness.runner.main(), 0)
+            target = harness.output / 'synthetic-host-info.plist'
+            self.assertIn('LIVELINGO_HOST_INFO_PLIST=' + str(target), harness.command)
+            info = plistlib.loads(target.read_bytes())
+            self.assertIs(info.pop('LSUIElement'), True)
+            self.assertEqual(info, plistlib.loads(original))
+        self.assertEqual(source.read_bytes(), original)
+
     def test_full_run_cleans_before_testing_and_requires_compile_and_events(self):
         with RunnerHarness(self, exit_code=0) as harness:
             harness.args.only = []
@@ -619,6 +693,7 @@ class GateAndCleanupTests(unittest.TestCase):
             self.assertFalse(harness.runner.preference_events.call_args.kwargs["allow_empty"])
             harness.runner.retire_workers.assert_called_once()
             self.assertEqual(harness.receipt()["removed_workers"], ["worker-810001-synthetic"])
+            self.assertNotIn("archived_workers", harness.receipt())
 
     def test_focused_run_may_have_no_suites_but_still_requires_full_compile(self):
         with RunnerHarness(self, exit_code=0) as harness:
@@ -642,6 +717,29 @@ class GateAndCleanupTests(unittest.TestCase):
             harness.args.keep_workers = True
             self.assertEqual(harness.runner.main(), 0)
             harness.runner.retire_workers.assert_not_called()
+
+    def test_failed_build_timeout_or_preference_audit_retains_workers(self):
+        for options, result in (({"exit_code": 65}, 65), ({"timeout": True}, 124),
+                                ({"exit_code": 0}, 1)):
+            with self.subTest(options=options), RunnerHarness(self, **options) as harness:
+                if options == {"exit_code": 0}:
+                    harness.runner.preference_events.side_effect = ValueError("synthetic audit failure")
+                self.assertEqual(harness.runner.main(), result)
+                harness.runner.retire_workers.assert_not_called()
+                self.assertNotIn("removed_workers", harness.receipt())
+
+    def test_cleanup_error_records_completed_removals_without_claiming_the_rest(self):
+        with RunnerHarness(self, exit_code=0) as harness:
+            def partial_cleanup(*args, removed_workers, **kwargs):
+                removed_workers.append("worker-810001-synthetic")
+                raise OSError("synthetic second worker failure")
+
+            harness.runner.retire_workers.side_effect = partial_cleanup
+            self.assertEqual(harness.runner.main(), 0)
+            receipt = harness.receipt()
+            self.assertEqual(receipt["removed_workers"], ["worker-810001-synthetic"])
+            self.assertEqual(receipt["worker_cleanup_error"],
+                             "could not remove this invocation worker directories")
 
     def test_without_building_refuses_a_sandboxed_host_before_launch(self):
         with RunnerHarness(self, exit_code=0) as harness:
@@ -734,27 +832,116 @@ class WorkerDirectoryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no preference audit events"):
                 runner.preference_events(scratch, {810009}, previous, allow_empty=True)
 
-    def test_retire_removes_only_this_invocations_observed_workers(self):
+    def test_retire_removes_only_audited_observed_workers_without_quarantine(self):
         runner = load_runner()
         with tempfile.TemporaryDirectory(dir=WORK) as temporary:
             scratch = Path(temporary) / "tmp"
             scratch.mkdir()
+            runner.OUT = Path(temporary) / "evidence"
+            runner.OUT.mkdir()
             outside = Path(temporary) / "outside"
             outside.mkdir()
             (outside / "keep.txt").write_text("synthetic outside content\n")
             paths = self.layout(scratch)
             link = scratch / "worker-810001-00000000-0000-0000-0000-000000000004"
             link.symlink_to(outside, target_is_directory=True)
-            with self.assertRaisesRegex(ValueError, "invalid worker directory"):
-                runner.retire_workers(scratch, {810001}, {paths["old"].name})
+            current = paths["current"]
+            status = current.lstat()
+            audited = {current: (status.st_dev, status.st_ino)}
+            with patch.object(runner.shutil, "rmtree") as remove:
+                with self.assertRaisesRegex(ValueError, "invalid worker directory"):
+                    runner.retire_workers(scratch, {810001}, {paths["old"].name}, audited)
+                remove.assert_not_called()
             self.assertTrue((outside / "keep.txt").exists())
-            link.unlink()
-            self.assertEqual(runner.retire_workers(scratch, {810001}, {paths["old"].name}),
-                             [paths["current"].name])
-            self.assertFalse(paths["current"].exists())
+            # Treat the invalid link as pre-existing for this successful case;
+            # rmtree is mocked, so no fixture or evidence is really deleted.
+            with patch.object(runner.shutil, "rmtree") as remove:
+                self.assertEqual(runner.retire_workers(
+                    scratch, {810001}, {paths["old"].name, link.name}, audited), [str(current)])
+                remove.assert_called_once_with(current)
+            self.assertFalse((runner.OUT / 'to-trash').exists())
+            self.assertEqual((current / 'screenshots' / 'synthetic.png').read_bytes(), b'synthetic')
             self.assertTrue((paths["old"] / "screenshots" / "synthetic.png").exists())
             self.assertTrue((paths["other"] / "screenshots" / "synthetic.png").exists())
             self.assertTrue((outside / "keep.txt").exists())
+
+    def test_cross_volume_output_does_not_block_mock_worker_removal(self):
+        runner = load_runner()
+        with tempfile.TemporaryDirectory(dir=WORK) as temporary:
+            scratch = Path(temporary) / "tmp"
+            scratch.mkdir()
+            runner.OUT = Path(temporary) / "evidence"
+            runner.OUT.mkdir()
+            paths = self.layout(scratch)
+            current = paths["current"]
+            status = current.lstat()
+            audited = {current: (status.st_dev, status.st_ino)}
+            real_stat = Path.stat
+
+            def cross_volume(path, *args, **kwargs):
+                if path in (scratch, runner.OUT):
+                    status = real_stat(path, *args, **kwargs)
+                    return SimpleNamespace(st_dev=17 if path == scratch else 29,
+                                           st_mode=status.st_mode, st_uid=status.st_uid,
+                                           st_ino=status.st_ino)
+                return real_stat(path, *args, **kwargs)
+
+            with patch.object(Path, "stat", autospec=True, side_effect=cross_volume), \
+                    patch.object(Path, "rename", side_effect=AssertionError("moving workers is forbidden")), \
+                    patch.object(runner.shutil, "rmtree") as remove:
+                self.assertNotEqual(scratch.stat().st_dev, runner.OUT.stat().st_dev)
+                self.assertEqual(runner.retire_workers(
+                    scratch, {810001}, {paths["old"].name}, audited), [str(current)])
+                remove.assert_called_once_with(current)
+            self.assertTrue((paths["old"] / "screenshots/synthetic.png").exists())
+            self.assertTrue((paths["other"] / "screenshots/synthetic.png").exists())
+
+    def test_post_audit_workers_are_retained_and_changed_identity_rejects_cleanup(self):
+        runner = load_runner()
+        with tempfile.TemporaryDirectory(dir=WORK) as temporary:
+            scratch = Path(temporary)
+            paths = self.layout(scratch)
+            previous = {paths["old"].name, paths["other"].name}
+            audited = {}
+            self.assertEqual(runner.preference_events(
+                scratch, {810001}, previous, allow_empty=True, audited_workers=audited), ([], []))
+            current = paths["current"]
+            status = current.lstat()
+            self.assertEqual(audited, {current: (status.st_dev, status.st_ino)})
+            late = scratch / "worker-810001-00000000-0000-0000-0000-000000000005"
+            late.mkdir()
+            with patch.object(runner.shutil, "rmtree") as remove:
+                self.assertEqual(runner.retire_workers(scratch, {810001}, previous, audited),
+                                 [str(current)])
+                remove.assert_called_once_with(current)
+            self.assertTrue(late.exists())
+            audited[current] = (status.st_dev, status.st_ino + 1)
+            with patch.object(runner.shutil, "rmtree") as remove:
+                with self.assertRaisesRegex(ValueError, "invalid worker directory"):
+                    runner.retire_workers(scratch, {810001}, previous, audited)
+                remove.assert_not_called()
+
+    def test_wrong_owner_or_non_directory_is_never_removed(self):
+        runner = load_runner()
+        with tempfile.TemporaryDirectory(dir=WORK) as temporary:
+            scratch = Path(temporary)
+            paths = self.layout(scratch)
+            current = paths["current"]
+            status = current.lstat()
+            audited = {current: (status.st_dev, status.st_ino)}
+            with patch.object(runner.os, "getuid", return_value=status.st_uid + 1), \
+                    patch.object(runner.shutil, "rmtree") as remove:
+                with self.assertRaisesRegex(ValueError, "invalid worker directory"):
+                    runner.retire_workers(scratch, {810001}, {paths["old"].name}, audited)
+                remove.assert_not_called()
+            file_worker = scratch / "worker-810001-00000000-0000-0000-0000-000000000006"
+            file_worker.write_text("synthetic non-directory\n")
+            file_status = file_worker.lstat()
+            audited[file_worker] = (file_status.st_dev, file_status.st_ino)
+            with patch.object(runner.shutil, "rmtree") as remove:
+                with self.assertRaisesRegex(ValueError, "invalid worker directory"):
+                    runner.retire_workers(scratch, {810001}, {paths["old"].name}, audited)
+                remove.assert_not_called()
 
 
 class HostFileEvidenceTests(unittest.TestCase):
@@ -810,11 +997,11 @@ class HostFileEvidenceTests(unittest.TestCase):
             self.stuck_host(harness)
             existing = harness.output / "synthetic-sample-2-pid810001-files.txt"
             existing.write_text("previous synthetic file evidence\n")
-            self.assertEqual(harness.runner.main(), 124)
+            harness.runner.DD = harness.dd
+            result = harness.runner.host_file_evidence(existing, 810001)
             self.assertEqual(existing.read_text(), "previous synthetic file evidence\n")
-            host = next(sample for sample in harness.receipt()["samples"] if sample["pid"] == 810001)
-            self.assertIsNone(host["files"])
-            self.assertEqual(host["files_error"], "file evidence already exists")
+            self.assertIsNone(result["files"])
+            self.assertEqual(result["files_error"], "file evidence already exists")
             self.assertEqual(harness.evidence_commands, [])
 
     def test_host_workers_lists_only_that_hosts_real_directories(self):

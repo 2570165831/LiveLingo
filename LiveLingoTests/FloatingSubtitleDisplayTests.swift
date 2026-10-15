@@ -152,8 +152,8 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             let presentation = select(model, mode: mode)
             let lines = [presentation.source, presentation.translation].compactMap { $0 }
             XCTAssertEqual(lines, [.init(text: "这本书放在桌上。", languageName: "中文")])
-            XCTAssertEqual(presentation.source == nil, mode != .sourceOnly)
-            XCTAssertEqual(presentation.translation == nil, mode == .sourceOnly)
+            XCTAssertNil(presentation.source)
+            XCTAssertEqual(presentation.translation, .init(text: "这本书放在桌上。", languageName: "中文"))
         }
         XCTAssertEqual(model.segments.first?.english, "這本書放在桌上。")
         XCTAssertEqual(model.segments.first?.chinese, "这本书在桌上。")
@@ -176,6 +176,39 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
                 XCTAssertEqual([presentation.source, presentation.translation].compactMap { $0?.text }, ["这里很冷。"])
             }
         }
+    }
+
+    func testChineseModesHaveIdenticalRenderedTextPositionAndStyle() async throws {
+        try enableHostAccessibility()
+        let (model, store) = try fixture()
+        let preferences = FloatingSubtitlePreferences(store: store)
+        preferences.sourceTextSize = 16
+        preferences.translationTextSize = 32
+        model.loadPresentationForTesting(phase: .recording, evidence: [
+            TranscriptSegment(startTime: 0, endTime: 2, english: "這本書放在桌上。", sourceLanguage: "zh")])
+        let (window, controller) = host(floating(model, store: store))
+        defer { window.close() }
+        var referenceFrame: NSRect?
+        var referenceBody: Data?
+        for mode in FloatingSubtitleDisplayMode.allCases {
+            preferences.displayMode = mode
+            try await resizeAndSettle(window, view: controller.view)
+            let text = try XCTUnwrap(accessibleNodes(in: controller.view).first {
+                $0.value("accessibilityValue") as? String == "这本书放在桌上。"
+                    || $0.value("accessibilityLabel") as? String == "这本书放在桌上。"
+            })
+            let frame = try XCTUnwrap(text.value("accessibilityFrame") as? NSValue).rectValue
+            let image = try bitmap(controller.view)
+            let body = try rowPixels(image, view: controller.view, rows: 70..<300)
+            if let referenceFrame, let referenceBody {
+                XCTAssertEqual(frame, referenceFrame, "Every mode must use the same font and reading origin")
+                XCTAssertEqual(body, referenceBody, "Chinese-source body pixels must match in all modes")
+            } else {
+                referenceFrame = frame
+                referenceBody = body
+            }
+        }
+        print("FLOATING_CHINESE_MODES identical origin/font/body pixels across all three modes")
     }
 
     func testEnglishTranslationOnlyFallsBackUntilPreviewOrFormalTranslationIsUsable() throws {
@@ -407,6 +440,9 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         try await resizeAndSettle(window, view: controller.view)
         let pending = try bitmap(controller.view)
         let scale = CGFloat(pending.pixelsHigh) / controller.view.bounds.height
+        let pendingHeight = controller.view.bounds.height
+        let source = try XCTUnwrap(subtitleScrollViews(controller.view).first)
+        let sourceTop = controller.view.convert(source.bounds, from: source).minY
         XCTAssertTrue(hasVisibleText(pending, scale: scale, rows: 50..<130))
         XCTAssertFalse(hasVisibleText(pending, scale: scale, rows: 160..<280))
         try capture(controller.view, name: "floating-es-translationOnly-pending")
@@ -414,11 +450,18 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         model.loadPresentationForTesting(phase: .recording, evidence: [caption])
         try await settle(controller.view)
         let completed = try bitmap(controller.view)
-        XCTAssertFalse(hasVisibleText(completed, scale: scale, rows: 50..<130))
-        XCTAssertTrue(hasVisibleText(completed, scale: scale, rows: 160..<280))
+        XCTAssertTrue(hasVisibleText(completed, scale: scale, rows: 50..<130))
+        XCTAssertFalse(hasVisibleText(completed, scale: scale, rows: 160..<280))
+        let translation = try XCTUnwrap(subtitleScrollViews(controller.view).last)
+        XCTAssertEqual(controller.view.convert(translation.bounds, from: translation).minY, sourceTop, accuracy: 0.5,
+                       "Arrival of a translation must not move the single visible reading column")
+        XCTAssertEqual(controller.view.bounds.height, pendingHeight, accuracy: 0.5)
+        XCTAssertEqual(subtitleScrollViews(controller.view).first?.bounds.height, 0)
+        print("FLOATING_SINGLE_BODY pending/completed start_y=\(sourceTop) height=\(pendingHeight) stable")
     }
 
     func testLongSpanishCaptionStaysAtBottomWhenLanguageLabelMovesBetweenSlots() async throws {
+        try enableHostAccessibility()
         let (model, store) = try fixture()
         let preferences = FloatingSubtitlePreferences(store: store)
         model.loadPresentationForTesting(phase: .recording, evidence: [])
@@ -442,6 +485,13 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             XCTAssertEqual(current.count, 2)
             XCTAssertTrue(current.last === translation)
             try assertScrolledToBottom(translation)
+            let label = try XCTUnwrap(accessibleNodes(in: controller.view).first {
+                $0.value("accessibilityLabel") as? String == "语种：西班牙语"
+                    || $0.value("accessibilityValue") as? String == "语种：西班牙语"
+            })
+            let screenFrame = try XCTUnwrap(label.value("accessibilityFrame") as? NSValue).rectValue
+            let labelFrame = controller.view.convert(window.convertFromScreen(screenFrame), from: nil)
+            XCTAssertTrue(controller.view.bounds.contains(labelFrame), "A genuinely scrolled caption must keep its language label visible")
             if mode == .translationOnly {
                 XCTAssertGreaterThan(try XCTUnwrap(translation.documentView).bounds.height, bilingualHeight,
                                      "The language label must reduce text width and actually exercise reflow")
@@ -452,6 +502,15 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
     }
 
     func testNativeSizeMenuShowsCustomAndCanReselectThePreviousPreset() async throws {
+        try await checkSizeMenuShowsCustomAndCanReselectThePreviousPreset(nativePopup: false)
+    }
+
+    func testAuthorizedNativeSizePopupShowsCustomAndCanReselectThePreviousPreset() async throws {
+        try requireNativeMenuAuthorization()
+        try await checkSizeMenuShowsCustomAndCanReselectThePreviousPreset(nativePopup: true)
+    }
+
+    private func checkSizeMenuShowsCustomAndCanReselectThePreviousPreset(nativePopup: Bool) async throws {
         let (model, store) = try fixture()
         let preferences = FloatingSubtitlePreferences(store: store)
         model.loadPresentationForTesting(phase: .recording, evidence: [])
@@ -460,7 +519,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         preferences.sourceTextSizeBinding.wrappedValue = 18
         preferences.translationTextSizeBinding.wrappedValue = 36
         try await resizeAndSettle(window, view: controller.view)
-        let items = try inspectSizeMenu(in: controller.view, selecting: "标准")
+        let items = try inspectSizeMenu(in: controller.view, selecting: "标准", nativePopup: nativePopup)
         let custom = try XCTUnwrap(items.first { $0.title == "自定义" })
         XCTAssertFalse(custom.enabled)
         for title in ["标准", "大", "特大"] {
@@ -472,7 +531,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         let reopened = FloatingSubtitlePreferences(store: store)
         XCTAssertEqual(reopened.sourceTextSize, 21)
         XCTAssertEqual(reopened.translationTextSize, 24)
-        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: controller.view).first { $0.title == "标准" }).state, .on)
+        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: controller.view, nativePopup: nativePopup).first { $0.title == "标准" }).state, .on)
     }
 
     func testHostedAccessibilitySeparatesLanguageLabelAndHidesUnselectedCaption() async throws {
@@ -499,7 +558,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         }
     }
 
-    func testRecordingHeaderNamesPreviewTranslationOnlyWhenItCanRun() async throws {
+    func testRecordingHeaderNamesOnlyTheActuallyDisplayedPreviewTranslation() async throws {
         try enableHostAccessibility()
         for (supported, enabled, header, absent) in [(true, true, "实时字幕 · 初译", "实时字幕"),
                                                      (true, false, "实时字幕", "实时字幕 · 初译"),
@@ -509,7 +568,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             model.previewTranslationEnabled = enabled
             model.loadPresentationForTesting(phase: .recording, evidence: [
                 TranscriptSegment(startTime: 0, endTime: 2, english: "The water is cold.", chinese: "水很冷。")
-            ])
+            ], preview: "The water is cold.")
             let (window, controller) = host(floating(model, store: store))
             defer { window.close() }
             try await resizeAndSettle(window, view: controller.view)
@@ -521,7 +580,38 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         }
     }
 
+    func testConfirmedChineseAndSourceOnlyLinesNeverClaimToBeInitialTranslation() throws {
+        let (model, _) = try fixture()
+        model.previewTranslationSupportForTesting = true
+        model.previewTranslationEnabled = true
+        for caption in [
+            TranscriptSegment(startTime: 0, endTime: 2, english: "The water is cold.", chinese: "水很冷。"),
+            TranscriptSegment(startTime: 0, endTime: 2, english: "El agua está fría.", chinese: "水很冷。", sourceLanguage: "es"),
+            TranscriptSegment(startTime: 0, endTime: 2, english: "這裡很冷。", sourceLanguage: "zh")
+        ] {
+            model.loadPresentationForTesting(phase: .recording, evidence: [caption])
+            for mode in FloatingSubtitleDisplayMode.allCases {
+                let presentation = select(model, mode: mode)
+                XCTAssertFalse(presentation.translation?.isPreview ?? false)
+                XCTAssertEqual(model.floatingSubtitleHeader(for: presentation), "实时字幕")
+            }
+        }
+        model.loadPresentationForTesting(phase: .recording, evidence: [], preview: "Live speech.")
+        XCTAssertTrue(select(model, mode: .bilingual).translation?.isPreview == true)
+        XCTAssertEqual(model.floatingSubtitleHeader(for: select(model, mode: .sourceOnly)), "实时字幕")
+        XCTAssertTrue(model.previewChineseDisplay.hasPrefix("初译 · "), "Keep the user's existing inline wording")
+    }
+
     func testNonactivatingPanelSizeMenuShowsCustomAndCanReselectThePreviousPreset() async throws {
+        try await checkNonactivatingPanelSizeMenuShowsCustomAndCanReselectThePreviousPreset(nativePopup: false)
+    }
+
+    func testAuthorizedNonactivatingPanelSizePopupShowsCustomAndCanReselectThePreviousPreset() async throws {
+        try requireNativeMenuAuthorization()
+        try await checkNonactivatingPanelSizeMenuShowsCustomAndCanReselectThePreviousPreset(nativePopup: true)
+    }
+
+    private func checkNonactivatingPanelSizeMenuShowsCustomAndCanReselectThePreviousPreset(nativePopup: Bool) async throws {
         let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
         let preferences = FloatingSubtitlePreferences(store: fixture.defaults)
         fixture.model.loadPresentationForTesting(phase: .recording, evidence: [])
@@ -538,7 +628,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         controller.show(model: fixture.model)
         try await settle(view)
 
-        let items = try inspectSizeMenu(in: view, selecting: "标准")
+        let items = try inspectSizeMenu(in: view, selecting: "标准", nativePopup: nativePopup)
         XCTAssertFalse(try XCTUnwrap(items.first { $0.title == "自定义" }).enabled)
         for title in ["标准", "大", "特大"] {
             XCTAssertEqual(try XCTUnwrap(items.first { $0.title == title }).state, .off)
@@ -549,13 +639,13 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         XCTAssertEqual(standard.translationTextSize, 24)
         XCTAssertEqual(fixture.defaults.double(forKey: "floatingSourceTextSize"), 0)
         XCTAssertEqual(fixture.defaults.double(forKey: "floatingTranslationTextSize"), 0)
-        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: view, selecting: "特大")
+        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: view, selecting: "特大", nativePopup: nativePopup)
             .first { $0.title == "标准" }).state, .on)
         try await settle(view)
         let extraLarge = FloatingSubtitlePreferences(store: fixture.defaults)
         XCTAssertEqual(extraLarge.sourceTextSize, 29)
         XCTAssertEqual(extraLarge.translationTextSize, 32)
-        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: view).first { $0.title == "特大" }).state, .on)
+        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: view, nativePopup: nativePopup).first { $0.title == "特大" }).state, .on)
         XCTAssertTrue(controller.panel === panel)
     }
 
@@ -604,7 +694,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         }
     }
 
-    func testNonactivatingPanelTextControlsBecomeKeyAndCopyToPrivatePasteboard() async throws {
+    func testOffscreenPanelTextControlsSelectAndCopyToPrivatePasteboard() async throws {
         let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
         let source = "El agua está fría."
         let translation = "水很冷。"
@@ -612,10 +702,13 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             TranscriptSegment(startTime: 0, endTime: 2, english: source, chinese: translation, sourceLanguage: "es")
         ])
         let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)
+        controller.panelFactoryForTesting = { rect, style in
+            NSPanel(contentRect: rect, styleMask: style.subtracting(.nonactivatingPanel), backing: .buffered, defer: false)
+        }
         let panel = controller.prepareWindow(model: fixture.model)
         defer { controller.close() }
         let view = try XCTUnwrap(panel.contentView)
-        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertFalse(panel.styleMask.contains(.nonactivatingPanel), "This test must never borrow another app's focus")
         XCTAssertTrue(panel.canBecomeKey)
         XCTAssertTrue(panel.becomesKeyOnlyIfNeeded)
         XCTAssertFalse(panel.ignoresMouseEvents)
@@ -636,8 +729,6 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             XCTAssertTrue(control.needsPanelToBecomeKey)
             XCTAssertTrue(panel.makeFirstResponder(control))
             XCTAssertTrue(panel.firstResponder === control)
-            panel.makeKey()
-            XCTAssertTrue(panel.isKeyWindow)
             control.perform(selectAll, with: nil)
             pasteboard.clearContents()
             try copySelection(control, to: pasteboard)
@@ -721,12 +812,11 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
                     XCTAssertEqual(window.frame.height, frameHeight, accuracy: 0.5)
                     let image = try bitmap(controller.view)
                     let scale = CGFloat(image.pixelsHigh) / controller.view.bounds.height
-                    let sourceVisible = mode == .sourceOnly || (mode == .bilingual && caption.sourceLanguage != "zh")
-                    let translationVisible = mode != .sourceOnly
-                    XCTAssertEqual(hasVisibleText(image, scale: scale, rows: 50..<130), sourceVisible,
-                                   "The mounted source slot must actually follow the display mode")
-                    XCTAssertEqual(hasVisibleText(image, scale: scale, rows: 160..<280), translationVisible,
-                                   "The mounted translation slot must actually follow the display mode")
+                    XCTAssertTrue(hasVisibleText(image, scale: scale, rows: 50..<130),
+                                  "Single-body modes must use the same top reading position")
+                    XCTAssertEqual(hasVisibleText(image, scale: scale, rows: 160..<280),
+                                   mode == .bilingual && caption.sourceLanguage != "zh",
+                                   "Only bilingual captions have a second occupied reading slot")
                     // Ignore the legacy native menu in the header. Caption bodies,
                     // including grey language metadata, must stay readable in either host appearance.
                     let bodyStart = Int(70 * scale) * image.bytesPerRow
@@ -755,7 +845,50 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         print("FLOATING_DISPLAY_GEOMETRY content=\(contentHeight) frame=\(frameHeight) modes/languages/font-extremes stable")
     }
 
-    func testEnglishDefaultPixelsMatchFrozenLegacyViewAtEveryPresetInBothAppearances() async throws {
+    func testHeaderControlsWritePreferencesPauseAndLockWithoutOpeningMenus() async throws {
+        try enableHostAccessibility()
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let model = fixture.model
+        let store = fixture.defaults
+        let floatingWindow = FloatingSubtitleWindowController(defaults: store)
+        let panel = floatingWindow.prepareWindow(model: model)
+        defer { floatingWindow.shutdown() }
+        let view = try XCTUnwrap(panel.contentView)
+        try await settle(view)
+        func control(_ id: String) -> AccessibleNode? {
+            accessibleNodes(in: view).first { $0.value("accessibilityIdentifier") as? String == id }
+        }
+        XCTAssertNil(control("floating-pause"), "Idle panels cannot pause a nonexistent course")
+        model.loadPresentationForTesting(phase: .recording, evidence: [], preview: "Synthetic speech.")
+        try await settle(view)
+        let pause = try XCTUnwrap(control("floating-pause"))
+        XCTAssertEqual(pause.value("accessibilityLabel") as? String, "暂停录音")
+        let segments = try XCTUnwrap(descendants(view).compactMap { $0 as? NSSegmentedControl }.first)
+        XCTAssertEqual(segments.segmentCount, 3)
+        XCTAssertEqual((0..<3).map { segments.label(forSegment: $0) ?? "" }, ["双语", "译文", "原文"])
+        segments.selectedSegment = 1
+        XCTAssertTrue(segments.sendAction(segments.action, to: segments.target))
+        try await settle(view)
+        XCTAssertEqual(store.string(forKey: "floatingDisplayMode"), "translationOnly")
+        let press = NSSelectorFromString("accessibilityPerformPress")
+        XCTAssertTrue(pause.object.responds(to: press))
+        _ = pause.object.perform(press)
+        try await settle(view)
+        XCTAssertTrue(model.isPaused)
+        XCTAssertEqual(control("floating-pause")?.value("accessibilityLabel") as? String, "继续录音")
+        let lock = try XCTUnwrap(control("floating-lock"))
+        XCTAssertTrue(lock.object.responds(to: press))
+        _ = lock.object.perform(press)
+        try await settle(view)
+        XCTAssertTrue(floatingWindow.isLocked)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+        XCTAssertNil(control("floating-lock"))
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await settle(view)
+        XCTAssertNil(control("floating-pause"))
+    }
+
+    func testEnglishDefaultBodyPixelsMatchFrozenLegacyViewAtEveryPresetInBothAppearances() async throws {
         let (model, store) = try fixture()
         model.loadPresentationForTesting(phase: .recording, evidence: [],
                                         preview: "Compare the quantities and keep the stated conditions with the formula.")
@@ -769,22 +902,39 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
                     .defaultAppStorage(store).environment(\.colorScheme, dark ? .dark : .light))
                 try await resizeAndSettle(window, view: controller.view)
                 let legacy = try bitmap(controller.view)
-                let legacyPixels = try pixels(legacy)
-                let legacySize = controller.view.bounds.size
+                // Align the unchanged 240pt caption body and 22pt bottom padding,
+                // independently of the new direct-control header's height.
+                let legacyStart = Int((controller.view.bounds.height - 262)
+                    * CGFloat(legacy.pixelsHigh) / controller.view.bounds.height) * legacy.bytesPerRow
+                let legacyBody = try pixels(legacy).dropFirst(legacyStart)
                 let originalIsOpaque = window.isOpaque
                 let originalBackground = window.backgroundColor
                 controller.rootView = floating(model, store: store, dark: dark)
                 try await resizeAndSettle(window, view: controller.view)
                 let current = try bitmap(controller.view)
-                XCTAssertEqual(controller.view.bounds.size, legacySize)
                 XCTAssertEqual(window.isOpaque, originalIsOpaque)
                 XCTAssertEqual(window.backgroundColor, originalBackground)
                 XCTAssertEqual(current.pixelsWide, legacy.pixelsWide)
-                XCTAssertEqual(current.pixelsHigh, legacy.pixelsHigh)
-                XCTAssertTrue(try pixels(current) == legacyPixels,
-                              "Every rendered pixel must match 1a59adc's English view: \(preset) / dark=\(dark)")
+                let currentStart = Int((controller.view.bounds.height - 262)
+                    * CGFloat(current.pixelsHigh) / controller.view.bounds.height) * current.bytesPerRow
+                let identical = try pixels(current).dropFirst(currentStart) == legacyBody
+                XCTAssertTrue(identical,
+                              "Caption body pixels must match 1a59adc's English view: \(preset) / dark=\(dark)")
+                if !identical {
+                    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pixel-mismatch-\(UUID())")
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    try Data(legacyBody).write(to: directory.appendingPathComponent("legacy-body.bin"))
+                    try pixels(current).dropFirst(currentStart).write(to: directory.appendingPathComponent("current-body.bin"))
+                    try legacy.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("legacy.png"))
+                    try current.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("current.png"))
+                    let metadata: [String: Any] = ["preset": preset, "dark": dark,
+                        "legacy": [legacy.pixelsWide, legacy.pixelsHigh, legacy.bytesPerRow, legacy.bitsPerSample, legacy.bitsPerPixel, legacyStart],
+                        "current": [current.pixelsWide, current.pixelsHigh, current.bytesPerRow, current.bitsPerSample, current.bitsPerPixel, currentStart],
+                        "currentBounds": NSStringFromRect(controller.view.bounds)]
+                    try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]).write(to: directory.appendingPathComponent("metadata.json"))
+                }
                 try capture(controller.view, name: "english-default-\(Int(preset))-\(dark ? "dark" : "light")")
-                print("FLOATING_ENGLISH_PIXELS preset=\(preset) dark=\(dark) identical=\(try pixels(current) == legacyPixels) size=\(current.pixelsWide)x\(current.pixelsHigh)")
+                print("FLOATING_ENGLISH_BODY_PIXELS preset=\(preset) dark=\(dark) identical=\(identical) size=\(current.pixelsWide)x\(current.pixelsHigh)")
             }
         }
     }
@@ -905,10 +1055,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
                                           chinese: String(repeating: "这是用于检查滚动位置的长字幕。", count: 40))
         try await settle(controller.view)
         func scrollViews() -> [NSScrollView] {
-            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
-            return descendants(controller.view).compactMap { $0 as? NSScrollView }
-                .filter { [88.0, 138.0].contains(Double($0.bounds.height)) }
-                .sorted { $0.bounds.height < $1.bounds.height }
+            subtitleScrollViews(controller.view)
         }
         let original = scrollViews()
         XCTAssertEqual(original.count, 2, "Both real reading containers must be mounted")
@@ -922,6 +1069,43 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
                 XCTAssertTrue(scroll === original[index], "Mode switching must preserve each scroll container")
                 if (index == 0 && mode != .translationOnly) || (index == 1 && mode != .sourceOnly) {
                     try assertScrolledToBottom(scroll)
+                }
+            }
+        }
+    }
+
+    func testFloatingViewportFitsWholeRenderedLinesAtBothReadingScales() async throws {
+        let (model, store) = try fixture()
+        let preferences = FloatingSubtitlePreferences(store: store)
+        model.loadPresentationForTesting(phase: .recording, evidence: [])
+        let (window, controller) = host(floating(model, store: store))
+        defer { window.close() }
+        for readingScale in [1.0, 2.0] {
+            store.set(18 * readingScale, forKey: "transcriptTextSize")
+            for size in [16.0, 24.0, 40.0] {
+                preferences.sourceTextSize = size
+                preferences.translationTextSize = size
+                let text = Array(repeating: "Ag国", count: 20).joined(separator: "\n")
+                model.receiveLivePreviewForTesting(text, chinese: text)
+                try await resizeAndSettle(window, view: controller.view)
+                let scrolls = subtitleScrollViews(controller.view)
+                XCTAssertEqual(scrolls.count, 2)
+                for (index, scroll) in scrolls.enumerated() {
+                    func measure(_ lines: Int) -> CGFloat {
+                        let sample = NSHostingView(rootView: Text(Array(repeating: "Ag国", count: lines).joined(separator: "\n"))
+                            .font(.system(size: size * readingScale, weight: index == 0 ? .regular : .medium))
+                            .lineSpacing(5 * readingScale).fixedSize(horizontal: false, vertical: true))
+                        sample.frame.size.width = 640
+                        sample.layoutSubtreeIfNeeded()
+                        return sample.fittingSize.height
+                    }
+                    let first = measure(1), advance = measure(2) - first
+                    XCTAssertGreaterThanOrEqual(scroll.bounds.height, first - 0.5)
+                    let additionalLines = (scroll.bounds.height - first) / advance
+                    XCTAssertEqual(additionalLines, additionalLines.rounded(), accuracy: 0.02,
+                                   "Viewport must end after whole measured lines at size \(size), scale \(readingScale)")
+                    try assertScrolledToBottom(scroll)
+                    XCTAssertFalse(scroll.hasVerticalScroller)
                 }
             }
         }
@@ -1003,8 +1187,10 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
 
     private func subtitleScrollViews(_ view: NSView) -> [NSScrollView] {
         descendants(view).compactMap { $0 as? NSScrollView }
-            .filter { [88.0, 138.0].contains(Double($0.bounds.height)) }
-            .sorted { $0.bounds.height < $1.bounds.height }
+            .sorted {
+                let left = view.convert($0.bounds, from: $0), right = view.convert($1.bounds, from: $1)
+                return left.minY == right.minY ? left.height < right.height : left.minY < right.minY
+            }
     }
 
     private func assertScrolledToBottom(_ scroll: NSScrollView, file: StaticString = #filePath, line: UInt = #line) throws {
@@ -1030,7 +1216,79 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         }
     }
 
-    private func inspectSizeMenu(in view: NSView, selecting title: String? = nil) throws -> [SizeMenuItem] {
+    private func requireNativeMenuAuthorization() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["LIVELINGO_NATIVE_FOCUS_TESTS"] == "1",
+                          "Native menu tracking requires explicitly authorized screen use; default tests never open a menu")
+    }
+
+    private func sizeMenu(in root: NSMenu) -> NSMenu? {
+        if root.indexOfItem(withTitle: "标准") >= 0 { return root }
+        return root.items.compactMap(\.submenu).compactMap { sizeMenu(in: $0) }.first
+    }
+
+    private func sizeMenuItems(in root: NSMenu) -> [SizeMenuItem] {
+        root.items.flatMap { item in
+            [SizeMenuItem(title: item.title, enabled: item.isEnabled, state: item.state)]
+                + (item.submenu.map { sizeMenuItems(in: $0) } ?? [])
+        }
+    }
+
+    private func prepareSizeMenu(_ menu: NSMenu, button: NSPopUpButton) throws {
+        // SwiftUI's popup coordinator creates this NSMenu's items in its cell
+        // preparation callback, rather than NSMenuDelegate.menuNeedsUpdate.
+        // Invoke just that observed callback; never click or start tracking.
+        let cell = try XCTUnwrap(button.cell as? NSPopUpButtonCell)
+        let delegate = try XCTUnwrap(menu.delegate as? NSObject)
+        let selector = NSSelectorFromString("popUpButtonCell:willShowMenu:")
+        XCTAssertTrue(delegate.responds(to: selector))
+        guard delegate.responds(to: selector) else { return }
+        let method = try XCTUnwrap(class_getInstanceMethod(type(of: delegate), selector))
+        let returnType = try XCTUnwrap(method_copyReturnType(method))
+        defer { free(returnType) }
+        XCTAssertEqual(method_getNumberOfArguments(method), 4)
+        XCTAssertEqual(String(cString: returnType), "v")
+        guard method_getNumberOfArguments(method) == 4,
+              String(cString: returnType) == "v" else { return }
+        typealias Prepare = @convention(c) (AnyObject, Selector, NSPopUpButtonCell, NSMenu) -> Void
+        let prepare = unsafeBitCast(delegate.method(for: selector), to: Prepare.self)
+        prepare(delegate, selector, cell, menu)
+        menu.update()
+    }
+
+    private func inspectSizeMenu(in view: NSView, selecting title: String? = nil,
+                                 nativePopup: Bool = false) throws -> [SizeMenuItem] {
+        if nativePopup { return try inspectNativeSizeMenu(in: view, selecting: title) }
+        let button = try XCTUnwrap(descendants(view).compactMap { $0 as? NSPopUpButton }.first {
+            String(describing: type(of: $0)) == "SwiftUIPopupButton"
+        })
+        let tracking = MenuInspection()
+        NotificationCenter.default.addObserver(tracking, selector: #selector(MenuInspection.menuBegan(_:)),
+                                               name: NSMenu.didBeginTrackingNotification, object: nil)
+        defer {
+            NotificationCenter.default.removeObserver(tracking)
+            XCTAssertNil(tracking.menu, "Direct menu inspection and item actions must never start menu tracking")
+        }
+        // Read and update the real menu model without clicking the popup or
+        // entering AppKit's tracking loop. Its item targets retain SwiftUI's
+        // production binding actions, including reselecting the old preset.
+        let root = try XCTUnwrap(button.menu, "The size popup must provide its menu without tracking")
+        try prepareSizeMenu(root, button: button)
+        let menu = try XCTUnwrap(sizeMenu(in: root), "Menu items: \(sizeMenuItems(in: root).map(\.title))")
+        let items = sizeMenuItems(in: root)
+        if let title {
+            let index = menu.indexOfItem(withTitle: title)
+            XCTAssertGreaterThanOrEqual(index, 0)
+            guard index >= 0 else { return items }
+            XCTAssertTrue(menu.item(at: index)?.isEnabled == true)
+            menu.performActionForItem(at: index)
+        }
+        return items
+    }
+
+    private func inspectNativeSizeMenu(in view: NSView, selecting title: String? = nil) throws -> [SizeMenuItem] {
+        // Also guard the helper, so a future caller cannot accidentally bypass
+        // the opt-in test's authorization gate.
+        try requireNativeMenuAuthorization()
         let button = try XCTUnwrap(descendants(view).compactMap { $0 as? NSButton }.first {
             String(describing: type(of: $0)) == "SwiftUIPopupButton"
         })

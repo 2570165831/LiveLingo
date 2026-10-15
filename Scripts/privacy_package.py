@@ -72,6 +72,7 @@ LICENSE_NAME = re.compile(r"(?:license[s]?|licence[s]?|copying[0-9]?|notice[s]?|
 LICENSE_CODE_SUFFIXES = frozenset({".py", ".rs", ".pm", ".c", ".h", ".cpp", ".yml", ".yaml", ".toml", ".json"})
 APP_RESOURCES = frozenset({
     "LanguageRuntime", "ASRRuntime", "Models", "LICENSE", "THIRD_PARTY_NOTICES.md",
+    "model-storage-manifest.json",  # Data inventory, still checked as structured JSON.
     "Assets.car", "AppIcon.icns", "AppIcon.icon", "InfoPlist.strings",
     "ZhVariants",  # OpenCC tables and reviewed phrases for Traditional Chinese output
 })

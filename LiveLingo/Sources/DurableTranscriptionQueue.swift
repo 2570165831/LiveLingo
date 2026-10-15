@@ -55,6 +55,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         /// Why the exact range has no accepted transcript; identifiers only.
         var failureReason: TranscriptionWorkRecord.FailureReason?
         var otherLanguage = false
+        /// Only suppressed chunks persist classifier evidence. Admitted speech
+        /// keeps the existing recognition outcome and stored bytes unchanged.
+        var noSpeech = false
+        var speechConfidence: Double?
         // Runtime-only causal metadata; preserve legacy Outcome/archive bytes.
         var sourceDecision: SourceLanguagePolicy.Decision?
         var sourceInput: SourceLanguagePolicy.ProbeInput?
@@ -65,6 +69,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     }
     private let lock = NSRecursiveLock()
     private let transcriber: Transcriber
+    private let speechAnalyzer: SpeechPresenceGate.Analyzer
     private var context: Context?
     private var worker: Task<Void, Never>?
     private var active: Task<Outcome, Error>?
@@ -75,9 +80,21 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     private var recentFormulaContext = ""
     private var storageFailure: String?
 
-    init(transcriber: @escaping Transcriber = { url, model, enhance, mode in
-        try await QwenASRClient.transcribe(audioURL: url, modelKey: model, enhanceSpeech: enhance, language: mode)
-    }) { self.transcriber = transcriber }
+    /// Production entry point shared by live capture, import and CLI replay.
+    convenience init() {
+        self.init(transcriber: { url, model, enhance, mode in
+            try await QwenASRClient.transcribe(audioURL: url, modelKey: model, enhanceSpeech: enhance, language: mode)
+        }, speechAnalyzer: SpeechPresenceGate.maximumSpeechConfidence)
+    }
+
+    /// Inject both boundaries when using synthetic recognizer/audio doubles.
+    /// Existing recognition fixtures have no real speech and intentionally
+    /// exercise recognition without an external classifier.
+    init(transcriber: @escaping Transcriber,
+         speechAnalyzer: @escaping SpeechPresenceGate.Analyzer = { _ in nil }) {
+        self.transcriber = transcriber
+        self.speechAnalyzer = speechAnalyzer
+    }
 
     convenience init(transcriber: @escaping LegacyTranscriber) {
         self.init(transcriber: Self.englishOnly(transcriber))
@@ -116,7 +133,11 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             storageFailure = nil
         }
         if restoring {
+            let restoredOwner = lock.withLock { context }
             for record in journal.records {
+                if record.status == .noSpeech, let restoredOwner {
+                    Self.resolveNoSpeechIssue(record, owner: restoredOwner)
+                }
                 if let text = record.text, !text.isEmpty { emitCommit(record, text: text, repair: true) }
                 if record.candidateText != nil { emitCandidate(record) }
             }
@@ -537,6 +558,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     }
 
     private func retireCompletedAudio(_ journal: DurableTranscriptionJournal) throws {
+        #if LIVELINGO_DROP_PROBE
+        // Retain generated evidence: this experiment forbids file cleanup.
+        return
+        #else
         guard !journal.processingState.isCapturing else { return }
         for var record in journal.records where (record.status == .completed || record.status == .silent)
             && record.candidateText == nil && record.audioRetired != true
@@ -568,6 +593,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             try journal.put(record)
             try FileManager.default.removeItem(at: chunk)
         }
+        #endif
     }
 
     private static func materializeAudio(_ record: TranscriptionWorkRecord, journal: DurableTranscriptionJournal) throws -> URL {
@@ -734,14 +760,24 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     }
                     let claimed = record
                     let formulaContext = recentFormulaContext
+                    // Only the immediately preceding completed range is evidence
+                    // that the added left audio has already entered the body.
+                    let previous = context.journal.records.first { $0.ordinal == claimed.ordinal - 1 }
+                    let previousText = previous.flatMap { prior in
+                        prior.status == .completed && prior.textLanguage == nil
+                            && prior.sessionID == claimed.sessionID && prior.sampleRate == claimed.sampleRate
+                            && prior.endFrame == claimed.startFrame ? prior.text : nil
+                    }
                     let url = try Self.materializeAudio(record, journal: context.journal)
                     let recording = try context.journal.recordingURL(for: record)
-                    let task = Task { [transcriber] in
+                    let task = Task { [transcriber, speechAnalyzer] in
                         try await Self.recognize(claimed, audioURL: url, recordingURL: recording,
                                                  formulaContext: formulaContext, attempts: context.attempts,
+                                                 previousText: previousText,
                                                  sourceTrigger: claimed.sourceTriggerPredecessor ?? .init(),
                                                  deferSource: claimed.attempt == .initial,
                                                  transcriber: transcriber,
+                                                 speechAnalyzer: speechAnalyzer,
                                                  commitEnglish: { output in
                                                      try self.commitEnglishBeforeProbe(output, record: claimed, generation: token)
                                                  }, preserveDecision: { decision in
@@ -803,12 +839,26 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                             record.sourceRevisionAllowed = record.sourceRevisionAllowed != false
                                 && (claimed.text?.isEmpty != false || record.hasProvisionalInitialEnglish)
                         } else { try preserveInitialDecision(output.sourceDecision, record: &record, owner: owner) }
+                        // Recheck the live journal after the asynchronous attempt:
+                        // an explicit edit, candidate or retry may have arrived.
+                        if output.noSpeech, record.status != .active || record.manualRetryCount > 0 || record.attempt == .manual {
+                            try owner.journal.put(record)
+                            return
+                        }
                         let alreadyDelivered = record.text?.isEmpty == false
                         if let candidate = output.candidate {
                             record.candidateText = candidate; record.candidateOrigin = output.origin
                             record.candidateLanguage = nil
                         }
-                        if output.silent {
+                        if output.noSpeech, let confidence = output.speechConfidence {
+                            record = try owner.journal.markNoSpeech(id: record.id, speechConfidence: confidence)
+                            if record.status == .noSpeech {
+                                Self.resolveNoSpeechIssue(record, owner: owner)
+                                RecordingDiagnostics.append(recordingURL: try? owner.journal.recordingURL(for: record),
+                                    event: "transcription_no_speech", start: record.start, end: record.end,
+                                    detail: "", reason: .noSpeech)
+                            }
+                        } else if output.silent {
                             record.status = .silent; record.failure = nil; record.failureReason = nil
                             owner.handler(.volatile(text: "", start: record.start, end: record.end,
                                                     observedAt: ProcessInfo.processInfo.systemUptime))
@@ -829,7 +879,9 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         } else {
                             markFailure(&record, message: "此处尚未得到可靠的英文转写，音频已保留。", reason: output.failureReason)
                         }
-                        try owner.journal.put(record)
+                        // markNoSpeech atomically persisted either the terminal
+                        // verdict or the competing speech/candidate repair state.
+                        if !output.noSpeech || output.speechConfidence == nil { try owner.journal.put(record) }
                         if !alreadyDelivered, !output.text.isEmpty, record.text == output.text, record.textLanguage == output.language {
                             emitCommit(record, text: output.text, repair: claimed.attempt != .initial)
                         }
@@ -844,7 +896,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         try owner.journal.put(record)
                     }
                     try refreshInitialProgress(owner)
-                    if let failure = record.failure {
+                    if let failure = record.failure, record.status != .noSpeech, !Self.defersMissingNotice(record) {
                         let recording = record.recordingFile.map { owner.journal.directory.deletingLastPathComponent().appendingPathComponent($0) }
                         RecordingDiagnostics.append(recordingURL: recording,
                             event: record.status == .otherLanguage ? "transcription_non_english" : "transcription_missing",
@@ -969,7 +1021,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         try owner.journal.put(record)
                     }
                     if !record.needsWork { owner.attempts.remove(id: record.id) }
-                    if let failure = record.failure, failure != previousFailure || record.failureReason != previousReason {
+                    if let failure = record.failure, !Self.defersMissingNotice(record),
+                       failure != previousFailure || record.failureReason != previousReason {
                         let recording = record.recordingFile.map {
                             owner.journal.directory.deletingLastPathComponent().appendingPathComponent($0)
                         }
@@ -988,6 +1041,23 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         record.failure = message
         record.failureReason = reason
         record.status = record.automaticRetryCount < DurableTranscriptionJournal.maximumAutomaticRetries ? .retryWaiting : .failed
+    }
+
+    /// An empty first pass with a deferred causal head has not had its complete
+    /// no-speech decision yet. Keep durable retry work, but publish a missing
+    /// notice only after the first automatic repair can evaluate that head.
+    /// This also covers the source pump completing before the repair is claimed.
+    private static func defersMissingNotice(_ record: TranscriptionWorkRecord) -> Bool {
+        record.attempt == .initial && record.manualRetryCount == 0
+            && record.status == .retryWaiting && record.sourceProbeInput != nil
+            && record.text?.isEmpty != false && record.candidateText?.isEmpty != false
+            && record.appleEvidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func resolveNoSpeechIssue(_ record: TranscriptionWorkRecord, owner: Context) {
+        RecordingDiagnostics.resolveMissing(recordingURL: try? owner.journal.recordingURL(for: record),
+            start: record.start, end: record.end)
+        owner.handler(.transcriptionIssueResolved(start: record.start, end: record.end))
     }
     private func emitCommit(_ record: TranscriptionWorkRecord, text: String, repair: Bool,
                             replacingInitialText: String? = nil) {
@@ -1032,19 +1102,58 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             (context?.handler ?? fallbackHandler)?(.failure("转写工作记录无法保存：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"))
         }
     }
+    /// Never deduplicate body words by spelling: two equal words can have
+    /// different starts. Removed left words need a direct predecessor suffix.
+    static func retainedParakeetText(_ result: ASRTranscription, offset: Double,
+                                    clipDuration: Double, previousText: String?) -> String? {
+        guard let spans = result.parakeetWordSpans, !spans.isEmpty,
+              spans.map(\.text).joined(separator: " ") == result.text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " "),
+              spans.allSatisfy({ !$0.text.isEmpty && $0.text.split(whereSeparator: { $0.isWhitespace }).count == 1
+                  && $0.start.isFinite && $0.end.isFinite && $0.start >= 0
+                  && $0.end >= $0.start && $0.start < clipDuration && $0.end <= clipDuration }),
+              zip(spans, spans.dropFirst()).allSatisfy({ $0.start <= $1.start }) else { return nil }
+        let left = spans.prefix { $0.start < offset }
+        if !left.isEmpty {
+            func words(_ text: String) -> [String] {
+                text.lowercased().split { !$0.isLetter && !$0.isNumber && $0 != "'" && $0 != "’" }.map(String.init)
+            }
+            let excluded = words(left.map(\.text).joined(separator: " "))
+            guard let previousText, !excluded.isEmpty,
+                  Array(words(previousText).suffix(excluded.count)) == excluded else { return nil }
+        }
+        return spans.dropFirst(left.count).map(\.text).joined(separator: " ")
+    }
+
     static func recognize(_ record: TranscriptionWorkRecord, audioURL: URL, recordingURL: URL?,
                                   formulaContext: String, attempts: TranscriptionAttemptCache,
+                                  previousText: String? = nil,
                                   sourceTrigger: SourceLanguagePolicy.TriggerState = .init(),
                                   deferSource: Bool = false,
                                   sourceOnly: SourceLanguagePolicy.ProbeInput? = nil,
                                   transcriber: Transcriber,
+                                  speechAnalyzer: SpeechPresenceGate.Analyzer = { _ in nil },
                                   commitEnglish: @Sendable (Outcome) throws -> Void = { _ in },
                                   canStartSource: @Sendable () -> Bool = { true },
                                   preserveDecision: @Sendable (SourceLanguagePolicy.Decision) throws -> Void = { _ in }) async throws -> Outcome {
         try Task.checkCancellation()
+        // Preserve the original digital-silence verdict before any classifier.
         if sourceOnly == nil, try DigitalSilenceGate.isSilent(audioURL) {
             return Outcome(silent: true, sourceInput: deferSource
                 ? .init(parakeetAccepted: true, mean: nil, minimum: nil) : nil)
+        }
+        let mayFilter = sourceOnly == nil && record.attempt != .manual && record.manualRetryCount == 0
+            && record.text?.isEmpty != false && record.candidateText?.isEmpty != false
+            && record.appleEvidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // All recognizer/classifier evidence must describe these same bytes.
+        // An unreadable or changed waveform cannot support a no-speech verdict.
+        let gateAudio = mayFilter ? (try? TranscriptionAttemptCache.fingerprint(audioURL)) : nil
+        func singleWordEnergy(_ text: String) -> Double? {
+            guard mayFilter, record.fallbackModelKey != nil,
+                  SpeechPresenceGate.checksSingleWord(text, audioDuration: record.duration),
+                  let gateAudio, (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio,
+                  let energy = try? SpeechPresenceGate.maximumFrameRMS(audioURL),
+                  energy.isFinite, energy >= 0, energy < 0.01 else { return nil }
+            return energy
         }
         let attemptNonce = UUID()
         func recognizeStage(_ url: URL, model: String, enhance: Bool, stage: String,
@@ -1085,6 +1194,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         }
         var primary = ""
         var primaryResult: ASRTranscription?
+        var primaryFromExactRange = true
         var primaryError: Error?
         if sourceOnly != nil { primary = record.text ?? "" }
         else { do {
@@ -1096,6 +1206,45 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         catch { primaryError = error }
         }
         try Task.checkCancellation()
+        if sourceOnly == nil, record.attempt == .initial, record.modelKey == "parakeet",
+           record.duration > 0, record.duration <= 3, record.start >= 0.25,
+           primaryError == nil,
+           SpeechPipeline.preferredTranscript(primary: primary, fallback: "", audioDuration: record.duration).isEmpty,
+           let recordingURL {
+            do {
+                let layout = try WAVContextClip.readLayout(at: recordingURL)
+                let leftFrames = Int64((0.25 * layout.sampleRate).rounded(.down))
+                guard layout.sampleRate == record.sampleRate, leftFrames > 0,
+                      record.startFrame >= leftFrames, record.endFrame <= Int64(layout.frameCount) else {
+                    throw WAVContextClip.ClipError.rangeNotWrittenYet
+                }
+                let first = record.startFrame - leftFrames
+                let clip = try WAVContextClip.extract(from: recordingURL, start: Double(first) / layout.sampleRate,
+                    end: record.end, padding: 0, destinationDirectory: audioURL.deletingLastPathComponent(),
+                    frameRange: Int(first)..<Int(record.endFrame))
+                #if !LIVELINGO_DROP_PROBE
+                defer { try? FileManager.default.removeItem(at: clip) }
+                #endif
+                guard Int64(try WAVContextClip.readLayout(at: clip).frameCount) == record.endFrame - first else {
+                    throw WAVContextClip.ClipError.rangeNotWrittenYet
+                }
+                let padded = try await recognizeStage(clip, model: "parakeet", enhance: false, stage: "leftContext")
+                let offset = Double(leftFrames) / layout.sampleRate
+                let retained = retainedParakeetText(padded, offset: offset,
+                    clipDuration: Double(record.endFrame - first) / layout.sampleRate, previousText: previousText)
+                if let retained,
+                   !SpeechPipeline.preferredTranscript(primary: retained, fallback: "", audioDuration: record.duration).isEmpty {
+                    primary = retained
+                    primaryResult = padded
+                    primaryFromExactRange = false
+                }
+                // Unaligned left context may include borrowed words. Keep the
+                // exact-range retries free of candidates; neighbour candidates
+                // are offered below only after their automatic budget is spent.
+            } catch is CancellationError { throw CancellationError() }
+            catch { /* Optional left context never invalidates the exact-range pass. */ }
+        }
+        let primaryHadText = !primary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let usable = SpeechPipeline.preferredTranscript(primary: primary, fallback: "", audioDuration: record.duration)
         let formula = FormulaASRReview.needsReview(primary, context: formulaContext)
         let needsFallback = sourceOnly == nil && (primaryError != nil || formula || !EnglishTranscriptGate.accepts(primary)
@@ -1114,14 +1263,18 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 ? .rejection(of: primary, audioDuration: record.duration) : .error
         }
         var fallbackVerdict: EnglishTranscriptGate.Verdict?
+        var fallbackHasText = false
         var fallbackSucceeded = false
         var fallbackFailed = false
-        // Any usable primary English is durable before optional work begins.
-        if plan.selected && !output.text.isEmpty { try commitEnglish(output) }
+        // Ordinary primary English is durable before optional work. Hold only
+        // an exact-range quiet word until its independent quality check finishes.
+        let primaryEnergy = primaryFromExactRange ? singleWordEnergy(usable) : nil
+        if plan.selected && !output.text.isEmpty && primaryEnergy == nil { try commitEnglish(output) }
         if needsFallback, let model = record.fallbackModelKey {
             do {
                 // Formal English repair also precedes the optional language head.
                 let secondary = try await recognizeStage(audioURL, model: model, enhance: true, stage: "fallback").text
+                fallbackHasText = !secondary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 fallbackSucceeded = true
                 let alternate = SpeechPipeline.preferredTranscript(primary: nil, fallback: secondary, audioDuration: record.duration)
                 fallbackVerdict = EnglishTranscriptGate.verdict(secondary)
@@ -1141,6 +1294,46 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         // request to the same failed fallback before reporting the error.
         if sourceOnly == nil, output.text.isEmpty, !fallbackSucceeded, let primaryError { throw primaryError }
         if fallbackFailed { return output }
+        // Complete formal primary/fallback recognition before a quality head.
+        // The short-word shape is only a candidate: original PCM energy, the
+        // sound classifier and a confident raw "None" head must all agree.
+        // A padded primary, alternate candidate or missing evidence fails open.
+        if output.candidate == nil, primaryFromExactRange, let model = record.fallbackModelKey,
+           let energy = primaryEnergy ?? singleWordEnergy(output.text), let gateAudio {
+            let key = TranscriptionAttemptCache.SpeechKey(id: record.id, audio: gateAudio)
+            let confidence: Double?
+            if let cached = attempts.speechAnalysis(for: key) { confidence = cached.confidence }
+            else {
+                confidence = try? speechAnalyzer(audioURL)
+                try Task.checkCancellation()
+                if (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio {
+                    attempts.storeSpeechAnalysis(.init(confidence: confidence), for: key)
+                }
+            }
+            if SpeechPresenceGate.shouldSuppress(confidence), canStartSource(),
+               (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio {
+                do {
+                    // The same exact-range cached head can serve the later
+                    // source-language decision without another model request.
+                    let head = try await recognizeStage(audioURL, model: model, enhance: false,
+                        stage: "wordQuality", mode: .probe)
+                    let negative = SpeechPresenceGate.languageSuggestsNoSpeech(
+                        valid: head.text.isEmpty && head.languageMode == .probe && head.policy == 1,
+                        noSpeechLabel: head.detectedLabel == "None", probability: head.languageProbability,
+                        englishProbability: head.englishProbability)
+                    if (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio,
+                       SpeechPresenceGate.quietSingleWord(output.text, audioDuration: record.duration,
+                           maximumFrameRMS: energy, speechConfidence: confidence,
+                           languageHeadSuggestsNoSpeech: negative) {
+                        output.text = ""
+                        output.failureReason = .emptyOutput
+                    }
+                } catch is CancellationError { throw CancellationError() }
+                catch { /* An unavailable quality head never erases speech. */ }
+            }
+        }
+        try Task.checkCancellation()
+        if primaryEnergy != nil, plan.selected, !output.text.isEmpty { try commitEnglish(output) }
         if deferSource, record.fallbackModelKey != nil,
            plan.selected || record.sourceTriggerPredecessor == nil,
            !output.text.isEmpty || record.sourceTriggerPredecessor == nil {
@@ -1155,6 +1348,34 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 if sourceOnly != nil, let saved = record.sourceTriggerDecision { decision = saved }
                 else {
                     let head = try await recognizeStage(audioURL, model: model, enhance: false, stage: "languageProbe", mode: .probe)
+                    // Reuse this already scheduled head; never start another
+                    // language request ahead of formal work or deferred causality.
+                    let validHead = head.text.isEmpty && head.languageMode == .probe && head.policy == 1
+                        && (head.detectedLabel == "None" || SpokenLanguage.all.contains { $0.qwenLabel == head.detectedLabel })
+                    if mayFilter, output.text.isEmpty, output.candidate == nil,
+                       !primaryHadText, !fallbackHasText,
+                       SpeechPresenceGate.parakeetSuggestsNoSpeech(valid: primaryResult?.parakeetConfidenceValid,
+                           mean: primaryResult?.parakeetMeanProbability, minimum: primaryResult?.parakeetMinProbability,
+                           emptyTranscript: primary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty),
+                       SpeechPresenceGate.languageSuggestsNoSpeech(valid: validHead, noSpeechLabel: head.detectedLabel == "None",
+                           probability: head.languageProbability, englishProbability: head.englishProbability),
+                       let gateAudio, (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio {
+                        let key = TranscriptionAttemptCache.SpeechKey(id: record.id, audio: gateAudio)
+                        let confidence: Double?
+                        if let cached = attempts.speechAnalysis(for: key) { confidence = cached.confidence }
+                        else {
+                            confidence = try? speechAnalyzer(audioURL)
+                            try Task.checkCancellation()
+                            if (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio {
+                                attempts.storeSpeechAnalysis(.init(confidence: confidence), for: key)
+                            }
+                        }
+                        try Task.checkCancellation()
+                        if (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio,
+                           SpeechPresenceGate.shouldSuppress(confidence) {
+                            return Outcome(failureReason: .noSpeech, noSpeech: true, speechConfidence: confidence)
+                        }
+                    }
                     decision = SourceLanguagePolicy.decide(plan,
                     language: SpokenLanguage.all.first { $0.qwenLabel == head.detectedLabel }?.code,
                     probability: head.languageProbability, englishProbability: head.englishProbability,
@@ -1195,7 +1416,9 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
            record.automaticRetryCount >= DurableTranscriptionJournal.maximumAutomaticRetries,
            let recordingURL {
             let clip = try RecordingDiagnostics.contextAudio(recordingURL: recordingURL, start: record.start, end: record.end)
+            #if !LIVELINGO_DROP_PROBE
             defer { try? FileManager.default.removeItem(at: clip) }
+            #endif
             let text = try await recognizeStage(clip, model: record.fallbackModelKey ?? record.modelKey,
                                                 enhance: true, stage: "context", mode: .english).text
             try Task.checkCancellation()
@@ -1211,6 +1434,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
 /// A new queue generation owns a new cache. No audio, error, or cancelled result
 /// is retained. Nothing is written to archives. Gate checks still run on hits.
 final class TranscriptionAttemptCache: @unchecked Sendable {
+    struct SpeechKey: Hashable { let id: UUID; let audio: Data }
+    struct SpeechAnalysis { let confidence: Double? }
     struct Key: Hashable {
         let id: UUID
         let model: String
@@ -1222,6 +1447,19 @@ final class TranscriptionAttemptCache: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [Key: ASRTranscription] = [:]
     private var order: [Key] = []
+    private var speechEntries: [SpeechKey: SpeechAnalysis] = [:]
+    private var speechOrder: [SpeechKey] = []
+
+    func speechAnalysis(for key: SpeechKey) -> SpeechAnalysis? { lock.withLock { speechEntries[key] } }
+    func storeSpeechAnalysis(_ result: SpeechAnalysis, for key: SpeechKey) {
+        lock.withLock {
+            if speechEntries[key] == nil {
+                if speechOrder.count == 64 { speechEntries.removeValue(forKey: speechOrder.removeFirst()) }
+                speechOrder.append(key)
+            }
+            speechEntries[key] = result
+        }
+    }
 
     func result(for key: Key) -> ASRTranscription? { lock.withLock { entries[key] } }
     func store(_ result: ASRTranscription, for key: Key) {
@@ -1236,6 +1474,8 @@ final class TranscriptionAttemptCache: @unchecked Sendable {
     }
     func remove(id: UUID) {
         lock.withLock {
+            for key in speechOrder where key.id == id { speechEntries.removeValue(forKey: key) }
+            speechOrder.removeAll { $0.id == id }
             for key in order where key.id == id { entries.removeValue(forKey: key) }
             order.removeAll { $0.id == id }
         }

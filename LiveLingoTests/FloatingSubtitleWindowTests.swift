@@ -7,6 +7,127 @@ import XCTest
 /// orderFront regression orders a panel, at zero alpha and without activation.
 @MainActor
 final class FloatingSubtitleWindowTests: XCTestCase {
+    func testRecordStartPreferenceDefaultsOffAndBindingWritesOnlyItsKey() throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let preferences = FloatingSubtitlePreferences(store: fixture.defaults)
+        XCTAssertFalse(preferences.showsOnRecordStart)
+        XCTAssertNil(fixture.defaults.object(forKey: "floatingShowOnRecordStart"))
+        preferences.showsOnRecordStartBinding.wrappedValue = true
+        XCTAssertTrue(fixture.defaults.bool(forKey: "floatingShowOnRecordStart"))
+        preferences.showsOnRecordStartBinding.wrappedValue = false
+        XCTAssertFalse(preferences.showsOnRecordStart)
+    }
+
+    func testRecordStartObserverShowsOnlyOncePerStartAndRespectsUserHiding() throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let model = fixture.model
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)
+        let panel = controller.prepareWindow(model: model)
+        panel.alphaValue = 0
+        defer { controller.shutdown() }
+        let observer = FloatingSubtitleRecordStartObserver(model: model, windowController: controller,
+                                                          defaults: fixture.defaults)
+        withExtendedLifetime(observer) {
+            model.loadPresentationForTesting(phase: .preparing, evidence: [])
+            model.loadPresentationForTesting(phase: .recording, evidence: [])
+            XCTAssertFalse(controller.isVisible, "The default must leave the panel closed")
+            FloatingSubtitlePreferences(store: fixture.defaults).showsOnRecordStart = true
+            model.loadPresentationForTesting(phase: .preparing, evidence: [])
+            model.loadPresentationForTesting(phase: .recording, evidence: [])
+            XCTAssertTrue(controller.isVisible)
+            controller.hide()
+            model.loadPresentationForTesting(phase: .recording, evidence: [])
+            XCTAssertFalse(controller.isVisible)
+            model.loadPresentationForTesting(phase: .paused, evidence: [])
+            model.loadPresentationForTesting(phase: .recording, evidence: [])
+            XCTAssertFalse(controller.isVisible, "Resume cannot reopen a user-hidden panel")
+            model.loadPresentationForTesting(phase: .preparing, evidence: [])
+            model.loadPresentationForTesting(phase: .recording, evidence: [])
+            XCTAssertTrue(controller.isVisible, "A fresh recording may show it again")
+        }
+    }
+
+    func testRecordStartPolicyExcludesImportResumeDisabledAndAlreadyVisible() {
+        XCTAssertTrue(FloatingSubtitleRecordStartObserver.shouldShow(previous: .preparing, next: .recording,
+                                                                    importing: false, enabled: true, visible: false))
+        for (previous, importing, enabled, visible) in [(AppPhase.paused, false, true, false),
+                                                       (.preparing, true, true, false),
+                                                       (.preparing, false, false, false),
+                                                       (.preparing, false, true, true)] {
+            XCTAssertFalse(FloatingSubtitleRecordStartObserver.shouldShow(previous: previous, next: .recording,
+                                                                         importing: importing, enabled: enabled, visible: visible))
+        }
+        XCTAssertFalse(FloatingSubtitleRecordStartObserver.shouldShow(previous: .preparing, next: .recording,
+            importing: false, enabled: true, visible: false, alarmRollover: true))
+    }
+
+    func testTopPlacementHandlesScreenOriginsShortScreensAndMargins() {
+        let size = NSSize(width: 640, height: 350)
+        for visible in [NSRect(x: 0, y: 40, width: 1440, height: 900),
+                        NSRect(x: -1920, y: -1080, width: 1920, height: 1015),
+                        NSRect(x: 1440, y: 100, width: 2560, height: 1415)] {
+            let frame = FloatingSubtitleWindowPlacement.topFrame(windowSize: size, visibleFrame: visible)
+            XCTAssertEqual(frame.size, size)
+            XCTAssertEqual(frame.midX, visible.midX)
+            XCTAssertEqual(visible.maxY - frame.maxY, 20)
+            XCTAssertTrue(visible.contains(frame))
+        }
+        let short = NSRect(x: -1280, y: 64, width: 1280, height: 365)
+        XCTAssertEqual(FloatingSubtitleWindowPlacement.topFrame(windowSize: size, visibleFrame: short).minY, short.minY)
+        let undersized = NSRect(x: -500, y: -400, width: 500, height: 300)
+        let frame = FloatingSubtitleWindowPlacement.topFrame(windowSize: size, visibleFrame: undersized)
+        XCTAssertEqual(frame.size, size)
+        XCTAssertEqual(frame.maxY, undersized.maxY)
+        let visible = NSRect(x: 100, y: 40, width: 1200, height: 800)
+        XCTAssertEqual(FloatingSubtitleWindowPlacement.topFrame(windowSize: size, visibleFrame: visible, topInset: -20).maxY,
+                       visible.maxY)
+        XCTAssertEqual(FloatingSubtitleWindowPlacement.topFrame(windowSize: size, visibleFrame: visible, topInset: 1000).minY,
+                       visible.minY)
+    }
+
+    func testTopPlacementBeforePreparingWinsAndRespectsMenuBarClearance() throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let visible = NSRect(x: -1920, y: 42, width: 1920, height: 1015)
+        let screens = FloatingSubtitleWindowScreens(windowVisibleFrame: { _ in visible },
+                                                   mainVisibleFrame: { nil }, firstVisibleFrame: { nil },
+                                                   menuBarSafeMaxY: { _ in 900 })
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults, screens: screens)
+        controller.moveToScreenBottom()
+        controller.moveToScreenTop()
+        XCTAssertNil(controller.panel)
+        let panel = controller.prepareWindow(model: fixture.model)
+        defer { controller.shutdown() }
+        XCTAssertEqual(panel.frame.midX, visible.midX, accuracy: 1)
+        XCTAssertEqual(panel.frame.maxY, visible.maxY - 20, accuracy: 1)
+        XCTAssertFalse(panel.isVisible)
+        controller.setFullScreenClassMode(true)
+        controller.moveToScreenTop()
+        XCTAssertEqual(panel.frame.maxY, 900, accuracy: 1)
+        XCTAssertFalse(panel.isVisible)
+        XCTAssertNotNil(fixture.defaults.string(forKey: FloatingSubtitleWindowController.frameDefaultsKey))
+    }
+
+    func testVisibilityToggleShowsHidesAndPreservesRuntimeLock() throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)
+        let panel = controller.prepareWindow(model: fixture.model)
+        panel.alphaValue = 0
+        defer { controller.shutdown() }
+        controller.toggle(model: fixture.model)
+        XCTAssertTrue(controller.isVisible)
+        XCTAssertTrue(panel.isVisible)
+        controller.toggle(model: fixture.model)
+        XCTAssertFalse(controller.isVisible)
+        XCTAssertFalse(panel.isVisible)
+        controller.toggleLock()
+        controller.toggle(model: fixture.model)
+        controller.toggle(model: fixture.model)
+        XCTAssertFalse(controller.isVisible)
+        XCTAssertFalse(panel.isVisible)
+        XCTAssertTrue(controller.isLocked)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+    }
+
     func testFullScreenPanelAvoidsTheMenuBarRevealAreaEvenAfterDragging() throws {
         let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
         let screens = FloatingSubtitleWindowScreens(windowVisibleFrame: { _ in nil },
@@ -273,11 +394,11 @@ final class FloatingSubtitleWindowTests: XCTestCase {
         let panel = controller.prepareWindow(model: fixture.model)
         defer { controller.close() }
         try await settle(try XCTUnwrap(panel.contentView))
-        XCTAssertEqual(controller.lockActionTitle, "锁定浮动字幕")
+        XCTAssertEqual(controller.lockActionTitle, "锁定悬浮字幕")
         controller.toggleLock()
         XCTAssertTrue(controller.isLocked)
         XCTAssertTrue(panel.ignoresMouseEvents)
-        XCTAssertEqual(controller.lockActionTitle, "解锁浮动字幕")
+        XCTAssertEqual(controller.lockActionTitle, "解锁悬浮字幕")
         controller.toggleLock()
         XCTAssertFalse(controller.isLocked)
         XCTAssertFalse(panel.ignoresMouseEvents)
@@ -682,7 +803,7 @@ final class FloatingSubtitleWindowTests: XCTestCase {
         XCTAssertNil(controller.window)
         XCTAssertNil(controller.panel)
         XCTAssertFalse(controller.isLocked)
-        XCTAssertEqual(controller.lockActionTitle, "锁定浮动字幕")
+        XCTAssertEqual(controller.lockActionTitle, "锁定悬浮字幕")
         XCTAssertTrue(NSDictionary(dictionary: before).isEqual(
             to: try XCTUnwrap(store.persistentDomain(forName: suite))))
     }

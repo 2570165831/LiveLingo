@@ -125,6 +125,12 @@ struct CaptionTranslationDependencies {
     var repairTarget: ((DeferredCaptionRepair, CaptionTranslationTarget) async throws -> QwenTranslationClient.PreviousRepair)? = nil
     var retrySleep: @MainActor (TimeInterval) async throws -> Void = CaptionTranslationDependencies.sleepBeforeRetry
     var prepareRetry: @MainActor (String) async throws -> Void = { _ in }
+    var initialTranslation: @MainActor (String) async throws -> String = { _ in
+        throw QwenRuntimeError.runtimeUnavailable
+    }
+    var initialTranslationDeadline: @MainActor () async throws -> Void = {
+        try await Task.sleep(for: .seconds(3))
+    }
 
     nonisolated private static func sleepBeforeRetry(_ seconds: TimeInterval) async throws {
         try await Task.sleep(for: .seconds(seconds))
@@ -159,6 +165,17 @@ struct CaptionTranslationDependencies {
                 context: DeferredCaptionRepair.englishContext(pending.context), modelName: pending.modelName, target: target)
         }
         dependencies.prepareRetry = { try await MLXRuntime.shared.finishRetirementBeforeRetry($0) }
+        dependencies.initialTranslation = { text in
+            // installedSource never downloads a package or opens a preparation
+            // sheet. Older systems can reuse their prepared preview session.
+            guard #available(macOS 26.0, *) else { throw QwenRuntimeError.runtimeUnavailable }
+            let source = Locale.Language(identifier: "en")
+            let target = Locale.Language(identifier: "zh-Hans")
+            guard await LanguageAvailability().status(from: source, to: target) == .installed else {
+                throw QwenRuntimeError.runtimeUnavailable
+            }
+            return try await TranslationSession(installedSource: source, target: target).translate(text).targetText
+        }
         return dependencies
     }
     static let unavailable = Self(
@@ -225,6 +242,55 @@ struct LearningGenerationDependencies {
     }
 }
 
+/// An unstructured race: cancellation never joins a provider that ignores it.
+/// Only the first completion/timeout can publish; a late result is discarded.
+@MainActor
+private final class InitialTranslationRequest {
+    private var operation: Task<Void, Never>?
+    private var timer: Task<Void, Never>?
+    private var completed = false
+    private var completion: ((String?) -> Void)?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func start(source: String, translate: @escaping @MainActor (String) async throws -> String,
+               deadline: @escaping @MainActor () async throws -> Void,
+               completion: @escaping (String?) -> Void) {
+        self.completion = completion
+        operation = Task(priority: .utility) { [weak self] in
+            guard !Task.isCancelled else { return }
+            let text = try? await translate(source)
+            guard !Task.isCancelled else { return }
+            self?.finish(text)
+        }
+        timer = Task(priority: .utility) { [weak self] in
+            guard !Task.isCancelled else { return }
+            do { try await deadline() } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.finish(nil)
+        }
+    }
+
+    func wait() async {
+        guard !completed else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func cancel() { finish(nil) }
+
+    private func finish(_ text: String?) {
+        guard !completed else { return }
+        completed = true
+        operation?.cancel(); timer?.cancel()
+        operation = nil; timer = nil
+        let publish = completion
+        completion = nil
+        publish?(text)
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
+    }
+}
+
 /// Meter updates belong to their small views, rather than invalidating notes
 /// and the entire classroom for every audio callback or clock tick.
 @MainActor
@@ -248,6 +314,14 @@ final class LiveCaptionState: ObservableObject {
 final class FinalCaptionState: ObservableObject {
     @Published fileprivate(set) var translatingSegmentID: UUID?
     @Published fileprivate(set) var streamingChinese = ""
+
+    #if DEBUG
+    func loadPresentationForTesting(segmentID: UUID, text: String) {
+        precondition(AppRuntimeEnvironment.isUnitTesting)
+        translatingSegmentID = segmentID
+        streamingChinese = text
+    }
+    #endif
 }
 
 @MainActor
@@ -573,6 +647,8 @@ final class AppModel: ObservableObject {
             previewWake?.signal()
             updateReviewAvailability()
             applyIdleSleepAssertion()
+            alarmRecordingPhaseChanged()
+            updateChineseRecognitionCourseActions()
             persistCurrentSession()
         }
     }
@@ -590,6 +666,7 @@ final class AppModel: ObservableObject {
             // Only a timed preview event knows its range; it sets it right after.
             volatileRangeStart = nil
             volatileRangeEnd = nil
+            volatileResolvedRanges.removeAll(keepingCapacity: true)
             // Preserve source identity, stale-result clearing and wake-up semantics.
             if newValue != oldValue { markPreviewSourceChanged() }
             if oldValue.isEmpty || newValue.isEmpty || !newValue.hasPrefix(oldValue) {
@@ -601,12 +678,53 @@ final class AppModel: ObservableObject {
     /// Shown preview interval on the session-audio timeline; nil when unknown.
     private var volatileRangeStart: TimeInterval?
     private var volatileRangeEnd: TimeInterval?
-    /// A silent chunk may clear only a preview entirely within its own range.
-    /// Unknown ranges and previews extending into another chunk are retained.
-    private func emptyPreviewOwnsCurrentRange(start: TimeInterval, end: TimeInterval) -> Bool {
+    /// Disjoint resolved intervals for this preview delivery only. Every new
+    /// preview (even identical text/timing) and every state reset starts afresh.
+    private var volatileResolvedRanges: [ClosedRange<TimeInterval>] = []
+    /// Silence and finals can jointly resolve a cross-chunk preview. Clip to
+    /// its exact interval and merge only touching/overlapping ranges: an old
+    /// chunk ending at its start, a gap or unknown timing cannot own it.
+    private func resolveCurrentPreview(start: TimeInterval, end: TimeInterval) -> Bool {
         guard start.isFinite, end.isFinite, start >= 0, end > start,
               let previewStart = volatileRangeStart, let previewEnd = volatileRangeEnd else { return false }
-        return start <= previewStart && previewEnd <= end
+        let lower = max(start, previewStart), upper = min(end, previewEnd)
+        guard lower < upper else { return false }
+        let ranges = (volatileResolvedRanges + [lower...upper]).sorted { $0.lowerBound < $1.lowerBound }
+        var merged: [ClosedRange<TimeInterval>] = []
+        for range in ranges {
+            if let last = merged.last, range.lowerBound <= last.upperBound {
+                merged[merged.count - 1] = last.lowerBound...max(last.upperBound, range.upperBound)
+            } else {
+                merged.append(range)
+            }
+        }
+        volatileResolvedRanges = merged
+        return merged.count == 1 && merged[0].lowerBound == previewStart && merged[0].upperBound == previewEnd
+    }
+    /// Require an exact, nonempty token sequence, not fuzzy similarity or a
+    /// substring: Apple can attach genuinely new words to an old interval.
+    /// Fold case/width and Unicode composition, collapse whitespace and trim
+    /// sentence punctuation at token edges. Keep internal punctuation, signs,
+    /// digits, diacritics and word boundaries (1.5 != 15; re-sign != resign).
+    private static func previewComparisonTokens(_ text: String) -> [String] {
+        let normalized = text.folding(options: [.caseInsensitive, .widthInsensitive],
+                                      locale: Locale(identifier: "en_US_POSIX"))
+            .precomposedStringWithCanonicalMapping
+        let punctuation = CharacterSet(charactersIn: ".,!?;:…。？！、，；：\"“”")
+        return normalized.components(separatedBy: .whitespacesAndNewlines)
+            .map {
+                var token = $0[...]
+                while let first = token.unicodeScalars.first, punctuation.contains(first) {
+                    // A leading decimal separator belongs to the number (.5 != 5).
+                    if (first == "." || first == ","), token.dropFirst().first?.isNumber == true { break }
+                    token = token.dropFirst()
+                }
+                while let last = token.unicodeScalars.last, punctuation.contains(last) {
+                    token = token.dropLast()
+                }
+                return String(token)
+            }
+            .filter { !$0.isEmpty }
     }
     /// A final that ends well before the shown preview belongs to an earlier
     /// chunk; it must not clear speech the preview has already moved on to.
@@ -636,6 +754,9 @@ final class AppModel: ObservableObject {
     private var previewWake: PreviewWakeSignal?
     /// 每次 `runPreviewTranslation` 的身份；旧循环返回的结果不能写进新会话。
     private var previewRunToken: UUID?
+    private var initialTranslationCache: [String: String] = [:]
+    private var initialTranslationRequests: [UUID: (token: UUID, request: InitialTranslationRequest)] = [:]
+    private var preparedInitialTranslation: (@MainActor (String) async throws -> String)?
     /// 预览时序日志的窗口聚合状态（见 `tracePreviewReceiveHop`）。
     private var previewHopWindowStarted: TimeInterval = 0
     private var previewHopWorst: TimeInterval = 0
@@ -825,6 +946,7 @@ final class AppModel: ObservableObject {
         // 令牌必须在任何 await 之前绑定：否则旧会话的 prepareTranslation 返回后
         // 会覆盖新会话的令牌，把最新一次运行误判成“已过期”。
         guard applePreviewLanguagePair != nil else { return }
+        let supportsInitialFallback = applePreviewLanguagePair?.target == "zh-Hans"
         let runToken = UUID()
         previewRunToken = runToken
         // Wake the superseded loop before preparation: preparation may fail
@@ -850,6 +972,14 @@ final class AppModel: ObservableObject {
             // prepare 期间可能已经有更新的会话接替：旧会话直接退出，不改状态。
             guard previewRunToken == runToken else { return }
             previewTranslationStatus = "苹果初译 · 定稿后替换为正式译文"
+            preparedInitialTranslation = { [weak self] text in
+                guard let self, supportsInitialFallback, self.previewRunToken == runToken,
+                      self.captionTarget == .simplifiedChinese else { throw QwenRuntimeError.runtimeUnavailable }
+                return try await session.translate(text).targetText
+            }
+            defer {
+                if self.previewRunToken == runToken { self.preparedInitialTranslation = nil }
+            }
             let wake = PreviewWakeSignal()
             installPreviewWake(wake)
             defer { releasePreviewWake(wake) }
@@ -869,6 +999,9 @@ final class AppModel: ObservableObject {
                 translate: { try await session.translate($0).targetText },
                 deliver: { source, translated, timing in
                     self.previewChinese = self.captionTarget.normalize(translated)
+                    if supportsInitialFallback, self.captionTarget == .simplifiedChinese {
+                        self.rememberInitialTranslation(source: source.text, translated: translated)
+                    }
                     self.previewTranslationStatus = "苹果初译 · 定稿后替换为正式译文"
                     Self.tracePreview("delivered", characters: source.text.count, timing: timing)
                 },
@@ -1020,6 +1153,58 @@ final class AppModel: ObservableObject {
         }
     }
 
+    static let alarmDetectionDefaultsKey = "alarmDetectionEnabled"
+    static let alarmAutomaticSaveDefaultsKey = "alarmAutomaticSaveEnabled"
+    @Published var alarmDetectionEnabled: Bool {
+        didSet {
+            preferences.set(alarmDetectionEnabled, forKey: Self.alarmDetectionDefaultsKey)
+            pipeline.setAlarmDetectionEnabled(alarmDetectionEnabled && activeInputMode == .microphone)
+            if !alarmDetectionEnabled { clearAlarmReminder() }
+            else if isRecording && activeInputMode == .microphone { prepareAlarmPresenter() }
+        }
+    }
+    @Published var alarmAutomaticSaveEnabled: Bool {
+        didSet {
+            preferences.set(alarmAutomaticSaveEnabled, forKey: Self.alarmAutomaticSaveDefaultsKey)
+            if !alarmAutomaticSaveEnabled {
+                alarmCountdown.cancel(); alarmBanner?.secondsRemaining = nil
+            }
+        }
+    }
+    @Published private(set) var alarmBanner: AlarmBannerState?
+    @Published private(set) var alarmDetectionNotice: String?
+    @Published private(set) var alarmSwitchMilliseconds: Double?
+    private var alarmRule = AlarmTriggerRule()
+    private var alarmCountdown = AlarmCountdown()
+    private var alarmCountdownTask: Task<Void, Never>?
+    private var alarmRolloverTask: Task<Void, Never>?
+    private var alarmRolloverInProgress = false {
+        didSet { updateChineseRecognitionCourseActions() }
+    }
+    @Published private var alarmRolloverSwitching = false
+    private var alarmStopRequested = false
+    private var alarmPostSplitCourse = false
+    private var alarmRolloverCancellation: SpeechPipeline.AlarmRolloverCancellation?
+    private var alarmPreviousQueue: DurableTranscriptionQueue?
+    private struct AlarmArchivedCourse {
+        let directory: URL
+        let model: AppModel
+        let opening: Task<Void, Never>
+    }
+    private var alarmArchivedCourses: [AlarmArchivedCourse] = []
+    private var alarmArchivedProcessingTask: Task<Void, Never>?
+    private weak var alarmForegroundModel: AppModel?
+    var alarmRolloverIsActive: Bool { alarmRolloverInProgress }
+    #if DEBUG
+    var alarmPreparationParkedForTesting: (() -> Void)?
+    var alarmPreparationReadyForTesting: ((URL) async -> Void)?
+    var alarmBeforeEmptyCleanupForTesting: ((URL) -> Void)?
+    var alarmBeforeBindingForTesting: (() async throws -> Void)?
+    #endif
+    #if !LIVELINGO_CLI
+    private var alarmPresenter: AlarmReminderPresenter?
+    #endif
+
     @Published var exportFormat: NotesExportFormat = .markdown
     @Published var exportScope: NotesExportScope = .wholeLesson
     @Published var exportIncludesReviewAdvice = false
@@ -1094,16 +1279,36 @@ final class AppModel: ObservableObject {
     private var generation = 0
     private var sessionID = UUID()
     private var sessionSnapshot: SessionSnapshot?
+    let chineseRecognitionState = ChineseRecognitionPresentationState()
+    private var chineseRecognition: ChineseRecognitionDependencies
+    private var chineseRecognitionTasks: [UUID: Task<Void, Never>] = [:]
+    private var pendingChineseRecognition: [UUID: TranscriptSegment] = [:]
+    #if DEBUG
+    var chineseRecognitionArchiveBarrierForTesting: (@MainActor () async throws -> Void)?
+    #endif
+    private var chineseRecognitionTokens: [UUID: UUID] = [:]
+    private var retiredChineseRecognitionTasks: [UUID: Task<Void, Never>] = [:]
+    private var chineseRecognitionSyncTasks: [UUID: Task<Void, Never>] = [:]
+    private var chineseRecognitionLifecycleOwners: Set<UUID> = [] {
+        didSet { updateChineseRecognitionCourseActions() }
+    }
+    private var chineseRecognitionExportInProgress = false
+    private var chineseRecognitionUndoNotice: String?
     /// Set once when live capture starts; a live-only course has no archive
     /// until it is converted, so this carries the start into it.
     private var currentCaptureStart: SessionCaptureStart?
     private var sessionSaver: SessionSaveCoordinator?
     private var finalizationOwner: UUID?
-    private var finalizationInProgress = false
+    private var finalizationInProgress = false {
+        didSet { updateChineseRecognitionCourseActions() }
+    }
     private var sessionFinalizationTask: Task<Void, Never>?
-    @Published private var preparingApplicationExit = false
+    @Published private var preparingApplicationExit = false {
+        didSet { updateChineseRecognitionCourseActions() }
+    }
     var isTerminating: Bool { preparingApplicationExit }
     private var applicationExitDeadline: ExitDeadline?
+    private var conversionRecoveryTask: Task<Void, Never>?
     private let exitStorageProgress = ExitDeadline.StorageProgress()
     private var temporaryCleanupRequested = false
     private var lifecycleRevision = UUID()
@@ -1121,6 +1326,7 @@ final class AppModel: ObservableObject {
         var discardTemporarySession: (@MainActor @Sendable (URL) throws -> Void)?
     }
     private var privacyExitConfiguration: PrivacyExitConfiguration?
+    var chooseOutputDirectoryForTesting: (@MainActor () async -> URL?)?
     #endif
     private var processingTask: Task<Void, Never>?
     private var processingTaskID: UUID?
@@ -1137,7 +1343,14 @@ final class AppModel: ObservableObject {
     private var archiveWriteError: String?
     @Published private(set) var candidateConfirmationInFlight = false
     private var lastReviewInvalidation: (sessionID: UUID, revision: Int)?
-    @Published private(set) var archiveLoading = false
+    @Published private(set) var archiveLoading = false {
+        didSet { updateChineseRecognitionCourseActions() }
+    }
+    @Published private(set) var archiveCloudDownloadStatus: String?
+    private var archiveCloudDownloadTask: Task<SessionLoadResult, Error>?
+    private var archiveCloudDownloadToken: UUID?
+
+    func cancelCloudCourseOpen() { archiveCloudDownloadTask?.cancel() }
     @Published private(set) var legacyProvenanceUnavailable = false
     private var readinessGeneration = 0
     private var setupError: String?
@@ -1266,6 +1479,7 @@ final class AppModel: ObservableObject {
          pipeline: SpeechPipeline = SpeechPipeline(),
          translation: CaptionTranslationDependencies? = nil,
          notes: LearningGenerationDependencies? = nil,
+         chineseRecognition: ChineseRecognitionDependencies? = nil,
          backgroundServices: Bool = true,
          scheduledNotes: Bool? = nil,
          defaults: UserDefaults = AppRuntimeEnvironment.preferences,
@@ -1276,6 +1490,7 @@ final class AppModel: ObservableObject {
         self.pipeline = pipeline
         self.captionTranslation = translation ?? (AppRuntimeEnvironment.isUnitTesting ? .unavailable : .live)
         self.learningGeneration = notes ?? (AppRuntimeEnvironment.isUnitTesting ? .unavailable : .live)
+        self.chineseRecognition = chineseRecognition ?? (AppRuntimeEnvironment.isUnitTesting ? .unavailable : .live)
         self.backgroundServicesEnabled = backgroundServices && !AppRuntimeEnvironment.isUnitTesting
         self.scheduledNotesEnabled = scheduledNotes ?? (backgroundServices && !AppRuntimeEnvironment.isUnitTesting)
         precondition(!AppRuntimeEnvironment.isUnitTesting || !self.scheduledNotesEnabled || notes != nil,
@@ -1298,6 +1513,8 @@ final class AppModel: ObservableObject {
         noteBatchCharacters = savedBatchCharacters ?? SummaryRefreshPolicy.automaticBatchCharacters
         let savedFocusMode = preferences.bool(forKey: Self.focusModeDefaultsKey)
         let savedPreventIdleSleep = (preferences.object(forKey: Self.preventIdleSleepDefaultsKey) as? Bool) ?? true
+        alarmDetectionEnabled = (preferences.object(forKey: Self.alarmDetectionDefaultsKey) as? Bool) ?? true
+        alarmAutomaticSaveEnabled = (preferences.object(forKey: Self.alarmAutomaticSaveDefaultsKey) as? Bool) ?? true
         previewTranslationEnabled = (preferences.object(forKey: Self.previewTranslationDefaultsKey) as? Bool) ?? true
         let onBattery = PowerSourceMonitor.isOnBattery()
         processingFocusEnabled = savedFocusMode
@@ -1332,6 +1549,7 @@ final class AppModel: ObservableObject {
         do { outputDirectory = try PreviewDataIsolation.makeCoursesDirectory() }
         catch { archiveError = error.localizedDescription }
         #endif
+        updateChineseRecognitionCourseActions()
         guard backgroundServicesEnabled else { return }
         refreshPermissionLabels()
         refreshSummaryConcurrency()
@@ -1344,7 +1562,9 @@ final class AppModel: ObservableObject {
 
     var isRecording: Bool { phase == .recording }
     var isPaused: Bool { phase == .paused }
-    var hasActiveSession: Bool { isRecording || isPaused }
+    var hasActiveSession: Bool { isRecording || isPaused || (alarmRolloverInProgress && pipeline.alarmCaptureIsActive) }
+    var canPauseRecording: Bool { hasActiveSession && !alarmRolloverSwitching }
+    var sessionSwitchBlocked: Bool { alarmRolloverInProgress || preparingApplicationExit || phase.isBusy || archiveLoading }
     var isLiveOnly: Bool {
         if savedSessionDirectory != nil { return false }
         return (activeStorageMode ?? selectedStorageMode) == .liveOnly
@@ -1362,7 +1582,7 @@ final class AppModel: ObservableObject {
     }
     var isSystemAudio: Bool { currentInputMode == .systemAudio }
     var canStart: Bool {
-        !phase.isBusy && !archiveLoading && translationReady
+        !sessionSwitchBlocked && translationReady
     }
 
     var phaseLabel: String {
@@ -1444,6 +1664,14 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func chooseOutputDirectory() async -> URL? {
+        guard !alarmRolloverInProgress, !preparingApplicationExit else { return nil }
+        #if DEBUG
+        if AppRuntimeEnvironment.isUnitTesting, let chooseOutputDirectoryForTesting {
+            let directory = await chooseOutputDirectoryForTesting()
+            if let directory { useOutputDirectory(directory) }
+            return directory
+        }
+        #endif
         #if LIVELINGO_PREVIEW
         do {
             let directory = try PreviewDataIsolation.makeCoursesDirectory()
@@ -1463,7 +1691,8 @@ final class AppModel: ObservableObject {
         return await withCheckedContinuation { continuation in
             FilePanelPresentation.begin(panel) { [weak self] response in
                 Task { @MainActor in
-                    guard response == .OK, let directory = panel.url, let self else {
+                    guard response == .OK, let directory = panel.url, let self,
+                          !self.alarmRolloverInProgress, !self.preparingApplicationExit else {
                         continuation.resume(returning: nil)
                         return
                     }
@@ -1481,6 +1710,7 @@ final class AppModel: ObservableObject {
     /// Re-choosing the same folder also stores a fresh grant: that is what the
     /// legacy and unreachable-folder notices ask for.
     func useOutputDirectory(_ directory: URL) {
+        guard !alarmRolloverInProgress, !preparingApplicationExit else { return }
         outputDirectory = directory
         guard let staging = temporarySessionDirectory,
               let recovery = recoverableRecordings.first(where: { $0.id == sessionID && $0.needsPromotion }),
@@ -1497,33 +1727,121 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func convertCurrentSessionToRecording() async {
-        guard hasActiveSession, activeStorageMode == .liveOnly else { return }
+    enum RecordingConversionResult { case converted, cancelled, failed }
+
+    @discardableResult
+    func convertCurrentSessionToRecording(usingExistingOutputDirectory: Bool = false,
+                                          deadline: ExitDeadline? = nil) async -> RecordingConversionResult {
+        guard hasActiveSession, activeStorageMode == .liveOnly, !alarmRolloverInProgress else { return .cancelled }
         let identity = sessionID
         let epoch = generation
-        guard let directory = await chooseOutputDirectory(),
+        let directory: URL?
+        if usingExistingOutputDirectory, let existing = outputDirectory { directory = existing }
+        else { directory = await chooseOutputDirectory() }
+        guard let directory,
               sessionID == identity, generation == epoch,
-              hasActiveSession, activeStorageMode == .liveOnly else { return }
-        await convertCurrentSessionToRecording(in: directory)
+              hasActiveSession, activeStorageMode == .liveOnly else { return .cancelled }
+        if let deadline {
+            guard applicationExitDeadline?.hasPendingOperations != true else {
+                archiveError = "上次退出仍有任务未结束，内容与文件已保留，请稍后重试。"
+                return .failed
+            }
+            applicationExitDeadline = deadline
+            exitStorageProgress.attach(deadline)
+        }
+        // Choosing a folder is user interaction. The existing inactivity lease
+        // starts protecting storage only once that selection has completed.
+        deadline?.recordProgress()
+        let result = await ExitDeadline.$current.withValue(deadline ?? ExitDeadline.current) {
+            await convertCurrentSessionToRecording(in: directory)
+        }
+        if deadline != nil, result == .converted {
+            applicationExitDeadline = nil
+            exitStorageProgress.attach(nil)
+        } else if let deadline, result == .failed {
+            deadline.revoke()
+            resumeAfterFailedRecordingConversion(deadline, session: identity, epoch: epoch)
+        }
+        return result
     }
 
-    func convertCurrentSessionToRecording(in directory: URL) async {
-        guard hasActiveSession, activeStorageMode == .liveOnly else { return }
+    @discardableResult
+    func convertCurrentSessionToRecording(in directory: URL) async -> RecordingConversionResult {
+        guard hasActiveSession, activeStorageMode == .liveOnly, !alarmRolloverInProgress else { return .cancelled }
+        let chineseOwner = UUID()
+        chineseRecognitionLifecycleOwners.insert(chineseOwner)
+        defer { chineseRecognitionLifecycleOwners.remove(chineseOwner) }
         let identity = sessionID, epoch = generation
         do {
+            try await waitForChineseRecognitionWriters()
+            try ExitDeadline.current?.check()
             guard let source = sessionDirectory else { throw AppError.outputDirectoryMissing }
+            // A timed flush may never finish. Establish a readable archive and
+            // startup locator before entering that asynchronous wait. Preserve
+            // any existing archive and reject another session's identity.
+            let store = SessionStore(directory: source)
+            let initial: SessionSnapshot
+            if let stored = try store.load() {
+                guard stored.sessionID == identity else {
+                    throw SessionStoreError.identityConflict("转换位置属于另一课程，原件已保留")
+                }
+                initial = stored
+            } else {
+                var snapshot = SessionSnapshot(sessionID: identity, segments: segments,
+                    audioFiles: [.init(relativePath: SessionWorkspace.recordingFileName)],
+                    transcriptionJournalPath: DurableTranscriptionJournal.directoryName + "/work.jsonl",
+                    targetLocale: outputLanguage.persistedLocale)
+                snapshot.captureStart = currentCaptureStart
+                snapshot.generation = epoch
+                learningNotebook.writeState(to: &snapshot)
+                snapshot.processing.phase = .capturing
+                initial = try store.save(snapshot)
+            }
+            guard try store.load()?.sessionID == identity else { throw SessionStoreError.missingSnapshot }
             try pipeline.updatePersistence(persistsSession: true)
             activeStorageMode = .saveSession
             selectedStorageMode = .saveSession
             outputDirectory = directory
-            if sessionSaver == nil { bindSessionArchive(to: source) }
-            try await flushSessionArchive()
-            guard sessionID == identity, generation == epoch else { return }
+            if sessionSaver == nil { bindSessionArchive(to: source, restored: initial) }
             let recovery = SessionWorkspace.RecordingRecovery(id: identity, directory: source, outputRoot: directory)
                 .withOutputRoot(directory)
             try storeRecordingRecovery(recovery)
+            try ExitDeadline.current?.check()
+            try await flushSessionArchive()
+            guard sessionID == identity, generation == epoch else { return .cancelled }
+            try ExitDeadline.current?.check()
+            return .converted
         } catch {
             archiveError = "录音继续保留；转换后的保存或恢复索引尚未确认：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+            return .failed
+        }
+    }
+
+    private func resumeAfterFailedRecordingConversion(_ deadline: ExitDeadline, session: UUID, epoch: Int) {
+        conversionRecoveryTask?.cancel()
+        if let saver = sessionSaver {
+            // An index failure can precede the first awaited flush, while the
+            // coalesced archive writer is already running. Join it as well.
+            let settle = Task { @MainActor in _ = try? await saver.flush() }
+            deadline.track(settle)
+        }
+        conversionRecoveryTask = Task { @MainActor [weak self] in
+            await deadline.waitUntilDrained()
+            guard let self, !Task.isCancelled, self.sessionID == session, self.generation == epoch,
+                  self.applicationExitDeadline === deadline, !self.preparingApplicationExit,
+                  !deadline.hasPendingOperations else { return }
+            self.applicationExitDeadline = nil
+            self.exitStorageProgress.attach(nil)
+            self.conversionRecoveryTask = nil
+            // Only new work receives a fresh context; the old lease stays
+            // revoked so its delayed continuations still cannot publish.
+            ExitDeadline.$current.withValue(nil) {
+                ExitDeadline.$storageProgress.withValue(nil) {
+                    self.persistCurrentSession()
+                    self.drainTranslationQueue()
+                    self.scheduleSummaryRefresh(force: self.summaryRefreshRequested)
+                }
+            }
         }
     }
 
@@ -1549,7 +1867,7 @@ final class AppModel: ObservableObject {
     /// relaunched recovery reopens the selected folders through their
     /// app-scoped bookmarks and keeps those grants while the course is open.
     func recoverRecording(_ recovery: SessionWorkspace.RecordingRecovery) async {
-        guard !phase.isBusy, !archiveLoading else { return }
+        guard !sessionSwitchBlocked else { return }
         var record = recovery
         var grants: [SessionWorkspace.ScopedFolderAccess] = []
         var notice = "已恢复未完成录音；处理保持暂停，可重试保存到所选目录。"
@@ -1598,8 +1916,467 @@ final class AppModel: ObservableObject {
         catch { archiveNotice = notice + "恢复记录尚未更新：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
     }
 
+    private func alarmRecordingPhaseChanged() {
+        if phase == .paused {
+            alarmRule.clearEvidence()
+            alarmCountdown.cancel()
+            alarmBanner?.secondsRemaining = nil
+            alarmCountdownTask?.cancel(); alarmCountdownTask = nil
+        } else if phase == .recording {
+            if alarmDetectionEnabled && activeInputMode == .microphone { prepareAlarmPresenter() }
+        } else if !alarmRolloverInProgress { clearAlarmReminder() }
+    }
+
+    private func prepareAlarmPresenter() {
+        #if !LIVELINGO_CLI
+        guard backgroundServicesEnabled, !preparingApplicationExit else { return }
+        if alarmPresenter == nil { alarmPresenter = AlarmReminderPresenter() }
+        #endif
+    }
+
+    func dismissAlarmReminder() {
+        alarmCountdown.cancel()
+        alarmCountdownTask?.cancel(); alarmCountdownTask = nil
+        alarmRule.dismiss(now: ProcessInfo.processInfo.systemUptime)
+        alarmBanner = nil
+        #if !LIVELINGO_CLI
+        alarmPresenter?.hide()
+        #endif
+    }
+
+    private func clearAlarmReminder() {
+        alarmCountdown.cancel()
+        alarmCountdownTask?.cancel(); alarmCountdownTask = nil
+        alarmRule.stop(); alarmBanner = nil
+        #if !LIVELINGO_CLI
+        alarmPresenter?.hide()
+        #endif
+    }
+
+    private func receiveAlarmSound(_ observation: AlarmSoundObservation,
+                                   now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard alarmDetectionEnabled, isRecording, activeInputMode == .microphone,
+              !isImportingFile, !alarmRolloverInProgress else { return }
+        guard alarmRule.observe(observation, now: now) else { return }
+        let automatic = alarmAutomaticSaveEnabled && activeStorageMode == .saveSession && !alarmPostSplitCourse
+        alarmBanner = AlarmBannerState(secondsRemaining: automatic ? AlarmPolicy.countdownSeconds : nil,
+                                      liveOnly: activeStorageMode == .liveOnly)
+        #if !LIVELINGO_CLI
+        if backgroundServicesEnabled {
+            if alarmPresenter == nil { alarmPresenter = AlarmReminderPresenter() }
+            let body = activeStorageMode == .liveOnly
+                ? "检测到警报声。实时暂存模式只提醒，不自动保存或分段。请以现场广播和工作人员指示为准。"
+                : AlarmPolicy.notification
+            alarmPresenter?.show(dismiss: { [weak self] in self?.dismissAlarmReminder() }, notificationBody: body)
+        }
+        #endif
+        guard automatic else { return }
+        alarmCountdown.start(now: now)
+        // Tests drive the same tick explicitly, never wait thirty real seconds.
+        guard !AppRuntimeEnvironment.isUnitTesting else { return }
+        alarmCountdownTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled, let self, alarmCountdown.deadline != nil else { return }
+                alarmCountdownTick(now: ProcessInfo.processInfo.systemUptime)
+            }
+        }
+    }
+
+    private func alarmCountdownTick(now: TimeInterval) {
+        guard alarmCountdown.deadline != nil else { return }
+        let remaining = alarmCountdown.remaining(now: now)
+        if alarmBanner?.secondsRemaining != remaining { alarmBanner?.secondsRemaining = remaining }
+        let due = alarmCountdown.takeDue(now: now, recording: isRecording, paused: isPaused,
+            importing: isImportingFile, liveOnly: activeStorageMode == .liveOnly,
+            enabled: alarmAutomaticSaveEnabled && alarmDetectionEnabled)
+        if alarmCountdown.deadline == nil { alarmBanner?.secondsRemaining = nil }
+        if due {
+            alarmBanner?.secondsRemaining = nil
+            alarmRolloverTask = Task { @MainActor [weak self] in
+                await self?.performAlarmRollover()
+                self?.alarmRolloverTask = nil
+            }
+        }
+    }
+
+    private func performAlarmRollover() async {
+        guard isRecording, activeInputMode == .microphone, activeStorageMode == .saveSession,
+              !isImportingFile, !alarmRolloverInProgress, !alarmPostSplitCourse, !preparingApplicationExit,
+              let previousDirectory = currentCourseDirectory else { return }
+        let parent: URL
+        if temporarySessionDirectory != nil {
+            guard let outputDirectory else {
+                alarmBanner = AlarmBannerState(failure: "未设置保存位置，录音继续保留；请先选择保存位置。")
+                return
+            }
+            parent = outputDirectory
+        } else { parent = previousDirectory.deletingLastPathComponent() }
+        alarmRolloverInProgress = true
+        alarmStopRequested = false
+        let cancellation = SpeechPipeline.AlarmRolloverCancellation()
+        alarmRolloverCancellation = cancellation
+        alarmBanner?.saving = true
+        let priorID = sessionID, epoch = generation, revision = lifecycleRevision
+        let target = outputLanguage
+        let nextID = UUID()
+        let nextDirectory = SessionWorkspace.uniqueFinalDirectory(in: parent,
+            preferredName: Self.sessionFolderName(startedAt: .now()) + AlarmPolicy.postAlarmFolderSuffix)
+        var boundary: SpeechPipeline.AlarmRolloverResult?
+        var preparedIdentity: SensitiveFileIO.Identity?
+        defer {
+            alarmPreviousQueue = nil; alarmRolloverSwitching = false; alarmRolloverInProgress = false
+            alarmRolloverCancellation = nil
+        }
+        do {
+            // Cancel/join old generation work while microphone PCM continues to
+            // arrive. No model health probe or permission dialog occurs at split.
+            try await parkSavedProcessing()
+            #if DEBUG
+            if AppRuntimeEnvironment.isUnitTesting { alarmPreparationParkedForTesting?() }
+            #endif
+            try validateLifecycleCompletion(revision)
+            guard sessionID == priorID, generation == epoch, isRecording,
+                  !alarmStopRequested, !preparingApplicationExit else { throw CancellationError() }
+            let preparedParent = try SensitiveFileIO.Directory.open(at: parent, create: false, tighten: false)
+            let prepared = try preparedParent.createSubdirectory(named: nextDirectory.lastPathComponent)
+            preparedIdentity = try prepared.identity
+            var initial = SessionSnapshot(sessionID: nextID,
+                audioFiles: [.init(relativePath: SessionWorkspace.recordingFileName)],
+                transcriptionJournalPath: DurableTranscriptionJournal.directoryName + "/work.jsonl",
+                targetLocale: target == .simplifiedChinese ? nil : target.rawValue)
+            initial.processing.paused = true
+            let initialSnapshot = try await Task.detached { [initial] in
+                try SessionStore(directory: nextDirectory).save(initial)
+            }.value
+            #if DEBUG
+            if AppRuntimeEnvironment.isUnitTesting { await alarmPreparationReadyForTesting?(nextDirectory) }
+            #endif
+            try validateLifecycleCompletion(revision)
+            guard sessionID == priorID, generation == epoch, isRecording,
+                  !alarmStopRequested, !preparingApplicationExit else { throw CancellationError() }
+            let nextEpoch = generation + 1
+            alarmPreviousQueue = pipeline.alarmQueueForArchive
+            // Preparation can still be paused; the short writer-switch/binding
+            // interval keeps Stop available but must not change capture state.
+            alarmRolloverSwitching = true
+            let result = try await pipeline.rolloverForAlarm(
+                recordingURL: nextDirectory.appendingPathComponent(SessionWorkspace.recordingFileName),
+                sessionID: nextID, cancellation: cancellation) { [weak self] event in
+                    Task { @MainActor in
+                        guard let self, self.generation == nextEpoch, self.sessionID == nextID else { return }
+                        self.consume(event)
+                    }
+                }
+            boundary = result
+            try validateLifecycleCompletion(revision)
+            guard sessionID == priorID, generation == epoch else { throw CancellationError() }
+            alarmSwitchMilliseconds = result.switchMilliseconds
+            // The old queue is parked, so its immutable terminal ranges can be
+            // bound to the old snapshot even though capture already writes new PCM.
+            if var snapshot = sessionSnapshot {
+                let work = result.previousQueue.records
+                let gaps = snapshot.audioRanges.filter { $0.interruptionReason != nil }
+                snapshot.audioRanges = work.map { record in
+                    SessionAudioRange(id: record.id, segmentID: record.id,
+                        filePath: SessionWorkspace.recordingFileName, startFrame: record.startFrame,
+                        frameCount: record.endFrame - record.startFrame,
+                        captureStart: record.captureStart ?? record.start, captureEnd: record.captureEnd ?? record.end)
+                } + gaps
+                snapshot.processing.lastCapturedTime = result.previousDuration
+                if !snapshot.audioFiles.isEmpty {
+                    snapshot.audioFiles[0].frameCount = result.previousFrames
+                    snapshot.audioFiles[0].sampleRate = result.sampleRate
+                    snapshot.audioFiles[0].isFinalized = true
+                }
+                sessionSnapshot = snapshot
+            }
+            stopElapsedClock()
+            try await flushSessionArchive()
+            try validateLifecycleCompletion(revision)
+            guard sessionID == priorID, generation == epoch else { throw CancellationError() }
+            let archiveDirectory = try await finalizeSessionDirectoryIfNeeded(resumeAfterMigration: false,
+                parkedQueue: result.previousQueue)
+            try validateLifecycleCompletion(revision)
+            guard sessionID == priorID, generation == epoch else { throw CancellationError() }
+            let captions = segments, notes = lectureSummary, legacy = summaryIsLegacyRendered
+            let evidence = notesScheduleEvidence, converter = chineseScriptConverter
+            try await Task.detached {
+                try SessionExporter.export(segments: captions, sessionDirectory: archiveDirectory,
+                    summary: notes, target: target, summaryIsLegacyRendered: legacy,
+                    summaryEvidence: evidence, converter: converter)
+            }.value
+            #if DEBUG
+            if AppRuntimeEnvironment.isUnitTesting { try await alarmBeforeBindingForTesting?() }
+            #endif
+            try validateLifecycleCompletion(revision)
+            guard sessionID == priorID, generation == epoch else { throw CancellationError() }
+            try retireRecordingRecovery(session: priorID)
+            // This dedicated transition preserves the exit lease, does no
+            // temporary cleanup, and cannot wait on its own tracked task.
+            try resetSessionStateForAlarmRollover(previousSession: priorID, previousGeneration: epoch, revision: revision)
+            sessionID = nextID; outputLanguage = target
+            sessionDirectory = nextDirectory; currentCaptureStart = result.nextCaptureStart
+            activeStorageMode = .saveSession; activeInputMode = .microphone
+            alarmPostSplitCourse = true
+            var capturedSnapshot = initialSnapshot
+            capturedSnapshot.captureStart = result.nextCaptureStart
+            bindSessionArchive(to: nextDirectory, restored: capturedSnapshot)
+            phase = .recording; beginElapsedClock()
+            try await flushSessionArchive()
+            try validateLifecycleCompletion(revision)
+            guard sessionID == nextID, generation == nextEpoch, pipeline.alarmCaptureIsActive,
+                  pipeline.transcriptionState()?.sessionID == nextID else { throw SpeechPipeline.PipelineError.noActiveSession }
+            processingPaused = false
+            try pipeline.resumeTranscription()
+            audioInputStatus = "麦克风已接入"
+            // Restart the reminder cooldown at successful segmentation, keeping
+            // any later deadline. New audio time must not revive the same alarm
+            // or replace the saved confirmation a few seconds after rollover.
+            alarmRule.dismiss(now: ProcessInfo.processInfo.systemUptime)
+            alarmRule.clearEvidence()
+            alarmBanner = AlarmBannerState(saved: true)
+            if !preparingApplicationExit { retainAlarmSavedCourse(archiveDirectory, queue: result.previousQueue) }
+            if result.queueFinalizationFailed {
+                await stopSession(failure: "分段后的转写状态保存失败；前后两段录音均已保留。")
+            } else if alarmStopRequested || preparingApplicationExit { await stopSession() }
+        } catch {
+            if boundary == nil, let preparedIdentity {
+                do {
+                    #if DEBUG
+                    let beforeRemoval = AppRuntimeEnvironment.isUnitTesting ? alarmBeforeEmptyCleanupForTesting : nil
+                    #else
+                    let beforeRemoval: ((URL) -> Void)? = nil
+                    #endif
+                    try Self.removeUnrecordedAlarmDirectory(nextDirectory, session: nextID, identity: preparedIdentity,
+                                                           beforeRemoval: beforeRemoval)
+                }
+                catch { archiveNotice = "未开始录音的警报分段目录含未知内容或无法清理，已保留供检查。" }
+            }
+            // An obsolete rollover can retain its files but must never stop or
+            // rewrite a pipeline that has since been rebound by another owner.
+            guard (sessionID == priorID && generation == epoch) || (sessionID == nextID && generation == epoch + 1) else { return }
+            let captureID = pipeline.transcriptionState()?.sessionID
+            guard captureID == priorID || captureID == nextID else { return }
+            // Preparation failure keeps writing the first course. A committed
+            // boundary failure keeps *both* trees and closes the new writer;
+            // neither recording is removed or overwritten.
+            if boundary != nil {
+                await pipeline.stopCapture(continueTranscribing: false)
+                phase = .failed("警报分段保存未完成；前后两段录音与课程文件均已保留。")
+            } else if hasActiveSession, sessionID == priorID, generation == epoch, lifecycleRevision == revision {
+                // User pause may abort preparation after the ASR/translation
+                // queues were parked. Ordinary capture resume does not unpark
+                // them, so restore this course's processing even while paused.
+                processingPaused = false
+                try? pipeline.resumeTranscription()
+                restorePendingCaptionWork(); drainTranslationQueue()
+            }
+            if alarmStopRequested || preparingApplicationExit {
+                if boundary == nil { await stopSession() }
+                clearAlarmReminder()
+            } else if isPaused, error is CancellationError {
+                alarmBanner = AlarmBannerState()
+            } else if hasActiveSession {
+                alarmBanner = AlarmBannerState(failure: "自动分段未完成，现有录音与内容已保留。请按现场指示行动。")
+            } else {
+                clearAlarmReminder()
+                archiveNotice = "警报分段未完成；前后两段录音与课程文件均已保留。"
+            }
+        }
+    }
+
+    /// Only the exclusively-created preparation tree is eligible. A replaced
+    /// directory, unknown file, symlink, or any PCM frame vetoes the entire cleanup.
+    private static func removeUnrecordedAlarmDirectory(_ directory: URL, session: UUID,
+                                                       identity: SensitiveFileIO.Identity,
+                                                       beforeRemoval: ((URL) -> Void)? = nil) throws {
+        let parent = try SensitiveFileIO.Directory.open(at: directory.deletingLastPathComponent(),
+                                                       create: false, tighten: false)
+        guard let root = try parent.directoryIfPresent(named: directory.lastPathComponent),
+              try root.identity == identity else { throw SensitiveFileIO.Failure.unsafePath }
+        let allowed: Set<String> = [SessionStore.snapshotFileName, SessionStore.journalFileName,
+                                   ".session-store.lock", SessionWorkspace.recordingFileName,
+                                   DurableTranscriptionJournal.directoryName]
+        let names = try root.names()
+        guard Set(names).isSubset(of: allowed) else { throw SensitiveFileIO.Failure.unsafePath }
+        for name in names where name != DurableTranscriptionJournal.directoryName {
+            _ = try root.requireRegularFileIfPresent(named: name)
+        }
+        if let snapshot = try SessionStore(directory: directory).loadCommittedSnapshot() {
+            guard snapshot.sessionID == session, snapshot.segments.isEmpty, snapshot.batches.isEmpty,
+                  snapshot.audioRanges.isEmpty else { throw SensitiveFileIO.Failure.unsafePath }
+        }
+        if names.contains(SessionWorkspace.recordingFileName) {
+            guard try AVAudioFile(forReading: directory.appendingPathComponent(SessionWorkspace.recordingFileName)).length == 0
+            else { throw SensitiveFileIO.Failure.unsafePath }
+        }
+        let chunks = try root.directoryIfPresent(named: DurableTranscriptionJournal.directoryName)
+        let chunkNames = try chunks?.names() ?? []
+        if let chunks {
+            for name in chunkNames {
+                guard name == "work.jsonl" || Self.isAlarmPreparationChunkName(name) else {
+                    throw SensitiveFileIO.Failure.unsafePath
+                }
+                _ = try chunks.requireRegularFileIfPresent(named: name)
+                if name.hasSuffix(".wav") {
+                    guard try AVAudioFile(forReading: chunks.url.appendingPathComponent(name)).length == 0
+                    else { throw SensitiveFileIO.Failure.unsafePath }
+                }
+            }
+        }
+        try root.assertStillAtOriginalPath()
+        beforeRemoval?(directory)
+        // Remove only the validated preparation files. Any file added after
+        // validation remains untouched and makes the empty-directory check fail.
+        if let chunks {
+            let chunkIdentity = try chunks.identity
+            for name in chunkNames { try chunks.removeRegularFileIfPresent(named: name) }
+            try root.removeEmptyDirectory(named: DurableTranscriptionJournal.directoryName, matching: chunkIdentity)
+        }
+        for name in names where name != DurableTranscriptionJournal.directoryName {
+            try root.removeRegularFileIfPresent(named: name)
+        }
+        try parent.removeEmptyDirectory(named: directory.lastPathComponent, matching: identity)
+    }
+
+    private static func isAlarmPreparationChunkName(_ name: String) -> Bool {
+        for (prefix, suffix) in [("capture-", ".json"), ("chunk-", ".wav")] {
+            if name.hasPrefix(prefix), name.hasSuffix(suffix),
+               UUID(uuidString: String(name.dropFirst(prefix.count).dropLast(suffix.count))) != nil { return true }
+        }
+        return false
+    }
+
+    private func retainAlarmSavedCourse(_ directory: URL, queue: DurableTranscriptionQueue) {
+        let review = LearningReviewQueue(journalURL: directory.appendingPathComponent("alarm-review-queue.json"),
+            observeSleep: false, diagnostics: .disabled)
+        let saved = AppModel(reviewQueue: review, pipeline: SpeechPipeline(existingQueue: queue),
+            translation: captionTranslation, notes: learningGeneration, backgroundServices: false,
+            scheduledNotes: scheduledNotesEnabled, defaults: preferences,
+            chineseScriptConverter: chineseScriptConverter)
+        saved.alarmForegroundModel = self
+        let opening = Task { @MainActor [weak self] in
+            do {
+                try await saved.openSavedSession(directory, allowAutomaticProcessing: false)
+                self?.startAlarmSavedProcessingCoordinator()
+            } catch {
+                self?.archiveNotice = "警报前课程已保留；后台整理可在打开该课程后继续。"
+            }
+        }
+        alarmArchivedCourses.append(.init(directory: SessionDirectoryLocation.canonical(directory),
+                                          model: saved, opening: opening))
+    }
+
+    /// Reopen uses one archive/journal writer. Remove the background owner from
+    /// scheduling before any await, join its opening and all work, then let the
+    /// caller read the latest committed snapshot and bind its foreground queue.
+    private func takeAlarmSavedCourse(_ directory: URL) async throws -> Bool? {
+        let canonical = SessionDirectoryLocation.canonical(directory)
+        guard let index = alarmArchivedCourses.firstIndex(where: { $0.directory == canonical }) else { return nil }
+        let course = alarmArchivedCourses.remove(at: index)
+        course.model.alarmForegroundModel = nil
+        await course.opening.value
+        let wasPaused = course.model.processingPaused
+        do { try await course.model.parkSavedProcessing() }
+        catch {
+            // Failed parking cannot authorize a second writer on this course.
+            course.model.alarmForegroundModel = self
+            alarmArchivedCourses.append(course)
+            throw error
+        }
+        if alarmArchivedCourses.isEmpty {
+            alarmArchivedProcessingTask?.cancel()
+            await alarmArchivedProcessingTask?.value
+            alarmArchivedProcessingTask = nil
+        }
+        return wasPaused
+    }
+
+    private func startAlarmSavedProcessingCoordinator() {
+        guard !preparingApplicationExit, !alarmArchivedCourses.isEmpty, alarmArchivedProcessingTask == nil else { return }
+        alarmArchivedProcessingTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                // Old ASR/translation/note requests yield to live caption work.
+                // The existing memory/latency gate must also allow concurrency.
+                let livePending = hasActiveSession && (captionWorkPending || hasCaptionBacklog
+                    || (transcriptionProcessing?.pendingCount ?? 0) > 0 || summaryTask != nil || !summaryConcurrencyAllowed)
+                for course in alarmArchivedCourses {
+                    let saved = course.model
+                    guard saved.alarmForegroundModel === self else { continue }
+                    saved.summaryConcurrencyAllowed = summaryConcurrencyAllowed
+                    saved.summaryMemoryPressureNormal = summaryMemoryPressureNormal
+                    saved.runtimeResources = runtimeResources
+                    if livePending && !saved.processingPaused {
+                        try? await saved.parkSavedProcessing()
+                    } else if !livePending && saved.processingPaused {
+                        saved.resumeSavedProcessing()
+                    }
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+
+    #if DEBUG
+    func configureAlarmForTesting(input: AudioInputMode, storage: SessionStorageMode = .saveSession, importing: Bool = false) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        activeInputMode = input; activeStorageMode = storage; isImportingFile = importing
+    }
+    func beginAlarmMicrophoneCourseForTesting(directory: URL, storage: SessionStorageMode = .saveSession) async throws -> OwnedAudioCaptureBuffer {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        guard resetSessionStateForNewRun() else { throw AppError.sessionDirectoryMissing }
+        sessionDirectory = directory; outputDirectory = directory.deletingLastPathComponent()
+        activeInputMode = .microphone; activeStorageMode = storage; currentCaptureStart = .now()
+        if storage == .saveSession {
+            bindSessionArchive(to: directory)
+            try await flushSessionArchive()
+        } else { temporarySessionDirectory = directory }
+        let epoch = generation
+        let input = try await pipeline.startSyntheticCapture(format: MediaFileImport.storageFormat,
+            recordingURL: directory.appendingPathComponent(SessionWorkspace.recordingFileName),
+            sessionID: sessionID, persistsSession: storage.persistsSession, inputMode: .microphone) { [weak self] event in
+                Task { @MainActor in
+                    guard let self, self.generation == epoch else { return }
+                    self.consume(event)
+                }
+            }
+        phase = .recording
+        return input
+    }
+    func replayParkedAlarmProcessingForTesting() {
+        guard let state = alarmPreviousQueue?.state else { return }
+        consume(.processing(state))
+    }
+    func receiveAlarmSoundForTesting(_ observation: AlarmSoundObservation, now: TimeInterval) {
+        receiveAlarmSound(observation, now: now)
+    }
+    func alarmCountdownTickForTesting(now: TimeInterval) { alarmCountdownTick(now: now) }
+    var alarmCooldownDeadlineForTesting: TimeInterval { alarmRule.nextAllowedAt }
+    var alarmRolloverTaskForTesting: Task<Void, Never>? { alarmRolloverTask }
+    func presentAlarmBannerForTesting(_ state: AlarmBannerState) { alarmBanner = state }
+    func retireAlarmTasksForTesting() async {
+        clearAlarmReminder()
+        for course in alarmArchivedCourses { await course.opening.value }
+        alarmArchivedProcessingTask?.cancel()
+        await alarmArchivedProcessingTask?.value
+        alarmArchivedProcessingTask = nil
+        for course in alarmArchivedCourses {
+            let saved = course.model
+            try? await saved.parkSavedProcessing()
+            await saved.noteReviewQueue.shutdownForTesting()
+        }
+        alarmArchivedCourses.removeAll()
+    }
+    var alarmArchivedModelsForTesting: [AppModel] { alarmArchivedCourses.map(\.model) }
+    func waitForAlarmArchivesForTesting() async {
+        for course in alarmArchivedCourses { await course.opening.value }
+    }
+    #endif
+
     func start() {
-        guard !preparingApplicationExit, !phase.isBusy, !archiveLoading, !isImportingFile,
+        guard !sessionSwitchBlocked, !isImportingFile,
               sessionStartTask == nil else { return }
         guard admitLifecycleRetry() else { return }
         phase = .preparing
@@ -1631,7 +2408,7 @@ final class AppModel: ObservableObject {
     /// 选择本地音频/视频文件并走与实时录音相同的转写、翻译、笔记与导出流程。
     /// 不上传任何内容，也不改动源文件；导入需要先选定保存目录。
     func chooseAndImportMediaFile() {
-        guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
+        guard !sessionSwitchBlocked, !isImportingFile else { return }
         let panel = NSOpenPanel()
         panel.title = "导入本地音频或视频"
         panel.prompt = "导入"
@@ -1665,14 +2442,14 @@ final class AppModel: ObservableObject {
     }
 
     private func importMediaFile(_ fileURL: URL) async {
-        guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
+        guard !sessionSwitchBlocked, !isImportingFile else { return }
         #if LIVELINGO_PREVIEW
         do { try PreviewDataIsolation.requireCourseDirectory(fileURL) }
         catch { archiveError = error.localizedDescription; return }
         #endif
         guard admitLifecycleRetry() else { return }
         if outputDirectory == nil { await chooseOutputDirectory() }
-        guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
+        guard !sessionSwitchBlocked, !isImportingFile else { return }
         guard let outputDirectory else { return }
         let previousPhase = phase
         phase = .preparing
@@ -1943,6 +2720,12 @@ final class AppModel: ObservableObject {
     func clearExportStatus() { exportStatus = nil }
 
     func stop() {
+        clearAlarmReminder()
+        if alarmRolloverInProgress {
+            alarmStopRequested = true
+            alarmRolloverCancellation?.cancel()
+            return
+        }
         guard !preparingApplicationExit,
               hasActiveSession || (activeStorageMode == .liveOnly && temporarySessionDirectory != nil) else { return }
         guard admitLifecycleRetry() else { return }
@@ -1971,9 +2754,15 @@ final class AppModel: ObservableObject {
         applicationExitDeadline = deadline
         exitStorageProgress.attach(deadline)
         preparingApplicationExit = true
+        cancelAllChineseRecognition()
+        clearAlarmReminder()
+        alarmStopRequested = true
+        alarmRolloverCancellation?.cancel()
+        alarmArchivedProcessingTask?.cancel()
         defer { preparingApplicationExit = false }
         return await ExitDeadline.$current.withValue(deadline) {
             cancelScheduledSummaryRefresh()
+            cancelInitialTranslationRequests()
             processingPaused = true
             let readiness = readinessMonitorTask, power = powerMonitorTask
             let refresh = resourceRefreshTask, manual = manualTranslationTask
@@ -1981,6 +2770,8 @@ final class AppModel: ObservableObject {
             let translation = translationWorker, summary = summaryTask
             let processing = processingTask
             let finalization = sessionFinalizationTask
+            let alarmRollover = alarmRolloverTask
+            deadline.track(alarmRollover)
             for task in [translation, summary, processing, importing, starting, manual, refresh, readiness, power] {
                 deadline.track(task)
             }
@@ -1994,6 +2785,12 @@ final class AppModel: ObservableObject {
             let discardsContent = activeStorageMode == .liveOnly
                 || (temporarySessionDirectory != nil && sessionSaver == nil)
             do {
+                try await waitForChineseRecognitionWriters()
+                try await waitForLifecycle { await alarmRollover?.value }
+                for course in alarmArchivedCourses { try await waitForLifecycle { await course.opening.value } }
+                try await waitForLifecycle { [self] in await alarmArchivedProcessingTask?.value }
+                alarmArchivedProcessingTask = nil
+                for course in alarmArchivedCourses { try await course.model.parkSavedProcessing() }
                 try await waitForLifecycle { [self] in
                     await finalization?.value
                     while finalizationInProgress {
@@ -2147,12 +2944,16 @@ final class AppModel: ObservableObject {
     }
 
     private func clearLiveOnlySessionContent() {
+        cancelAllChineseRecognition()
+        chineseRecognitionState.statuses = [:]
         sessionSaver = nil
         sessionSnapshot = nil
         volatileEnglish = ""
         liveChinese = ""
         translatingSegmentID = nil
         clearTranslationPreview()
+        cancelInitialTranslationRequests()
+        initialTranslationCache.removeAll(keepingCapacity: false)
         segments = []
         initialSourceRevisionInputs = [:]
         resetLearningNotes()
@@ -2175,14 +2976,14 @@ final class AppModel: ObservableObject {
     }
 
     func pause() {
-        guard isRecording else { return }
+        guard isRecording, !alarmRolloverSwitching else { return }
         pipeline.pause()
         pauseElapsedClock()
         phase = .paused
     }
 
     func resume() {
-        guard isPaused else { return }
+        guard isPaused, !alarmRolloverSwitching else { return }
         do {
             try pipeline.resume()
             resumeElapsedClock()
@@ -2206,13 +3007,19 @@ final class AppModel: ObservableObject {
             return "录音已保存 · 译文与笔记处理已暂停"
         }
         if processingTask != nil { return "录音已保存 · 正在整理译文与笔记" }
-        if let state = transcriptionProcessing, state.unresolvedCount > 0 || state.otherLanguageCount > 0 {
-            var parts: [String] = []
+        var parts: [String] = []
+        if let state = transcriptionProcessing {
             if state.unresolvedCount > 0 { parts.append("\(state.unresolvedCount) 段缺少转写，可手动重试") }
             if state.otherLanguageCount > 0 { parts.append("\(state.otherLanguageCount) 段为\(SavedProcessingPresentation.untranscribedSpeech)") }
-            return "已保存 · " + parts.joined(separator: " · ")
         }
-        return nil
+        if let summary = SavedProcessingPresentation.noSpeechSummary(count: savedNoSpeechCount) {
+            parts.append(summary)
+        }
+        return parts.isEmpty ? nil : "已保存 · " + parts.joined(separator: " · ")
+    }
+
+    var savedNoSpeechCount: Int {
+        transcriptionProcessing?.noSpeechCount ?? sessionSnapshot?.processing.noSpeechCount ?? 0
     }
 
     var savedProcessingIsPaused: Bool { processingPaused }
@@ -2291,7 +3098,11 @@ final class AppModel: ObservableObject {
         snapshot.processing.pendingSegmentIDs = segments.filter { !$0.hasUsableTranslation }.map(\.id)
         snapshot.processing.pendingBatchIDs = learningDraft.map { [$0.id] } ?? []
         snapshot.processing.pendingCaptionRepairs = pendingCaptionRepairs.isEmpty ? nil : pendingCaptionRepairs
-        if isRecording || isPaused { snapshot.processing.phase = .capturing }
+        let noSpeechCount = transcriptionProcessing?.noSpeechCount ?? snapshot.processing.noSpeechCount ?? 0
+        snapshot.processing.noSpeechCount = noSpeechCount > 0 ? noSpeechCount : nil
+        if alarmRolloverInProgress, alarmPreviousQueue?.state?.sessionID == sessionID,
+           pipeline.transcriptionState()?.sessionID != sessionID { snapshot.processing.phase = .paused }
+        else if isRecording || isPaused { snapshot.processing.phase = .capturing }
         else if processingPaused { snapshot.processing.phase = .paused }
         else if phase == .stopping || processingTask != nil || (transcriptionProcessing?.pendingCount ?? 0) > 0 {
             snapshot.processing.phase = .draining
@@ -2344,8 +3155,12 @@ final class AppModel: ObservableObject {
     /// Suspend processing of the displayed saved course before switching UI.
     /// Capture has already ended. New recording never waits for a 9B review.
     private func parkSavedProcessing() async throws {
+        let chineseOwner = UUID()
+        chineseRecognitionLifecycleOwners.insert(chineseOwner)
+        defer { chineseRecognitionLifecycleOwners.remove(chineseOwner) }
         let revision = lifecycleRevision
         try validateLifecycleCompletion(revision)
+        try await waitForChineseRecognitionWriters()
         #if DEBUG
         if let park = privacyExitConfiguration?.park {
             try await waitForLifecycle { try await park() }
@@ -2367,6 +3182,7 @@ final class AppModel: ObservableObject {
         let translation = translationWorker
         let translationID = translationWorkerID
         let summary = summaryTask
+        cancelInitialTranslationRequests()
         processingPaused = true
         translationEnqueuedAt.removeAll()
         clearTranslationPreview()
@@ -2414,7 +3230,7 @@ final class AppModel: ObservableObject {
     }
 
     func chooseSavedSession() {
-        guard !isTerminating, !phase.isBusy, !archiveLoading else { return }
+        guard !isTerminating, !sessionSwitchBlocked else { return }
         let panel = NSOpenPanel()
         panel.title = "打开已保存课程"
         panel.prompt = "打开课程"
@@ -2443,22 +3259,46 @@ final class AppModel: ObservableObject {
     /// Only the explicit CLI reopen path calls this overload with the opt-in.
     private func openSavedSession(_ directory: URL, allowAutomaticProcessing: Bool,
                                   allowUnreleasedChineseOutput: Bool) async throws {
+        // Secure report readers reject a symlink at the leaf. Resolve aliases
+        // while retaining the caller's URL directory formatting.
+        let directory = URL(fileURLWithPath: directory.standardizedFileURL.resolvingSymlinksInPath().path,
+                            isDirectory: directory.hasDirectoryPath)
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireCourseDirectory(directory)
         #endif
-        guard !phase.isBusy, !archiveLoading else { return }
+        guard !sessionSwitchBlocked else { return }
         guard admitLifecycleRetry() else { throw ExitDeadlineExceeded() }
         archiveLoading = true
-        defer { archiveLoading = false }
+        defer {
+            archiveLoading = false
+            archiveCloudDownloadTask = nil
+            archiveCloudDownloadToken = nil
+            archiveCloudDownloadStatus = nil
+        }
+        let alarmPriorPaused = try await takeAlarmSavedCourse(directory)
+        let downloadToken = UUID()
+        archiveCloudDownloadToken = downloadToken
         let store = SessionStore(directory: directory)
-        var loaded = try await Task.detached { try store.loadDetailed() }.value
+        let download = Task { [weak self] in
+            try await SessionCloudOpenPreparation.load(store) { [weak self] count in
+                Task { @MainActor in
+                    guard let self, self.archiveCloudDownloadToken == downloadToken else { return }
+                    self.archiveCloudDownloadStatus = "这节课的文件还在云端，正在下载到本机；完成后自动打开。等待 \(count) 个文件。"
+                }
+            }
+        }
+        archiveCloudDownloadTask = download
+        var loaded = try await withTaskCancellationHandler { try await download.value } onCancel: { download.cancel() }
+        archiveCloudDownloadTask = nil
+        archiveCloudDownloadStatus = nil
+        archiveCloudDownloadToken = nil
         guard var snapshot = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
         _ = try LearningNotebook(snapshot: snapshot)
         var restoredLanguage = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot, origin: loaded.origin)
         try validateSavedOutputLanguage(restoredLanguage, allowUnreleasedChineseOutput: allowUnreleasedChineseOutput)
         let sameDirectory = sessionDirectory.map(SessionDirectoryLocation.canonical)
             == SessionDirectoryLocation.canonical(directory)
-        let priorPaused = sameDirectory ? processingPaused : snapshot.processing.paused
+        let priorPaused = sameDirectory ? processingPaused : alarmPriorPaused ?? snapshot.processing.paused
         try await parkSavedProcessing()
         if sameDirectory {
             loaded = try await Task.detached { try store.loadDetailed() }.value
@@ -2590,8 +3430,8 @@ final class AppModel: ObservableObject {
         let nextRevision = (sessionSnapshot?.inputRevision ?? segments.map(\.inputRevision).max() ?? 0) + 1
         var next = replacement
         let target = captionTarget
-        if target.keepsSourceAsCaption(language: next.sourceLanguage) {
-            next.completeTranslation(target.renderPassThrough(next.english), targetCode: target.rawValue)
+        if next.isChineseOriginal || target.keepsSourceAsCaption(language: next.sourceLanguage) {
+            next.completeTranslation(next.isChineseOriginal ? next.english : target.renderPassThrough(next.english), targetCode: target.rawValue)
             next.updateCaptionAnnotation(targetCode: target.rawValue,
                 formulaUncertain: (next.sourceLanguage == nil || next.sourceLanguage == "en")
                     && FormulaASRReview.uncertain(next.english))
@@ -2628,7 +3468,7 @@ final class AppModel: ObservableObject {
     /// 开始任意一次"课堂会话"前的状态重置：实时录音与文件导入共用。
     @discardableResult
     private func resetSessionStateForNewRun() -> Bool {
-        guard !preparingApplicationExit, !finalizationInProgress, sessionFinalizationTask == nil,
+        guard !preparingApplicationExit, !alarmRolloverInProgress, !finalizationInProgress, sessionFinalizationTask == nil,
               applicationExitDeadline?.hasPendingOperations != true else {
             archiveError = "前一次停止仍有任务未结束，内容与文件已保留，新课堂未开始。"
             return false
@@ -2651,6 +3491,24 @@ final class AppModel: ObservableObject {
         }
         applicationExitDeadline = nil
         lifecycleRevision = UUID()
+        clearSessionPresentationForNewRun()
+        return true
+    }
+
+    private func resetSessionStateForAlarmRollover(previousSession: UUID, previousGeneration: Int, revision: UUID) throws {
+        try validateLifecycleCompletion(revision)
+        guard alarmRolloverInProgress, alarmRolloverSwitching, sessionID == previousSession, generation == previousGeneration,
+              !finalizationInProgress, sessionFinalizationTask == nil,
+              processingPauseTask == nil, translationWorker == nil, summaryTask == nil, processingTask == nil else {
+            throw CancellationError()
+        }
+        clearSessionPresentationForNewRun()
+    }
+
+    private func clearSessionPresentationForNewRun() {
+        cancelAllChineseRecognition()
+        chineseRecognitionState.statuses = [:]
+        alarmPostSplitCourse = false
         if chineseDisplayOverride != nil {
             chineseDisplayOverride = nil
             prepareChineseDisplay()
@@ -2677,6 +3535,8 @@ final class AppModel: ObservableObject {
         liveChinese = ""
         translatingSegmentID = nil
         clearTranslationPreview()
+        cancelInitialTranslationRequests()
+        initialTranslationCache.removeAll(keepingCapacity: false)
         segments = []
         initialSourceRevisionInputs = [:]
         lectureSummary = ""
@@ -2710,7 +3570,6 @@ final class AppModel: ObservableObject {
         translationWorker = nil
         cancelSummaryTask()
         resetElapsedClock()
-        return true
     }
 
     private func startSession() async {
@@ -2791,6 +3650,7 @@ final class AppModel: ObservableObject {
             try validateLifecycleCompletion(revision)
 
             do {
+                pipeline.setAlarmDetectionEnabled(alarmDetectionEnabled && inputMode == .microphone)
                 let eventGeneration = generation
                 try await pipeline.start(
                     inputMode: inputMode,
@@ -2850,6 +3710,7 @@ final class AppModel: ObservableObject {
     }
 
     private func stopSession(failure: String? = nil) async {
+        clearAlarmReminder()
         if let task = sessionFinalizationTask { await task.value; return }
         if !preparingApplicationExit, applicationExitDeadline?.isExpired == true {
             guard applicationExitDeadline?.hasPendingOperations != true else { return }
@@ -2872,7 +3733,10 @@ final class AppModel: ObservableObject {
         guard finalizationOwner != identity else { return }
         finalizationOwner = identity
         finalizationInProgress = true
-        defer { finalizationInProgress = false }
+        defer {
+            finalizationInProgress = false
+            startPendingChineseRecognition()
+        }
         let mode = activeStorageMode
         if mode?.clearsHistoryWhenStopped == true {
             ExitDeadline.current?.track(translationWorker)
@@ -2883,6 +3747,7 @@ final class AppModel: ObservableObject {
         cancelScheduledSummaryRefresh()
         let stopStarted = ProcessInfo.processInfo.systemUptime
         do {
+            try await waitForChineseRecognitionWriters()
             try await stopCaptureForLifecycle(continueTranscribing: mode?.clearsHistoryWhenStopped != true)
             try validateLifecycleCompletion(revision)
         } catch {
@@ -2966,6 +3831,7 @@ final class AppModel: ObservableObject {
                 return
             }
             guard sessionID == identity, generation == epoch else { return }
+            cancelInitialTranslationRequests()
             processingPaused = true
             activeStorageMode = nil
             activeInputMode = nil
@@ -3014,6 +3880,7 @@ final class AppModel: ObservableObject {
         await pipeline.drainTranscription(sessionID: identity)
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
         noteSourceProducerDrained = true
+        startPendingChineseRecognition()
         drainTranslationQueue()
         startStopOverlapIfUseful()
         while translationWorker != nil || summaryTask != nil || hasPendingTranslationWork {
@@ -3045,6 +3912,8 @@ final class AppModel: ObservableObject {
         if summaryTaskGeneration == noteOwner { summaryTask = nil }
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
         do {
+            await waitForInitialTranslations()
+            guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
             try await flushSessionArchive()
             let captions = segments, notes = lectureSummary, target = outputLanguage
             let legacy = summaryIsLegacyRendered, evidence = notesScheduleEvidence, converter = chineseScriptConverter
@@ -3152,8 +4021,8 @@ final class AppModel: ObservableObject {
         let target = captionTarget
         for index in segments.indices where !segments[index].hasUsableTranslation {
             let id = segments[index].id
-            if target.keepsSourceAsCaption(language: segments[index].sourceLanguage) {
-                segments[index].completeTranslation(target.renderPassThrough(segments[index].english),
+            if segments[index].isChineseOriginal || target.keepsSourceAsCaption(language: segments[index].sourceLanguage) {
+                segments[index].completeTranslation(segments[index].isChineseOriginal ? segments[index].english : target.renderPassThrough(segments[index].english),
                     targetCode: target.rawValue)
                 segments[index].updateCaptionAnnotation(targetCode: target.rawValue,
                     formulaUncertain: (segments[index].sourceLanguage == nil || segments[index].sourceLanguage == "en")
@@ -3170,6 +4039,279 @@ final class AppModel: ObservableObject {
 
     func candidateInputRevision(_ id: UUID) -> Int {
         segments.first(where: { $0.id == id })?.inputRevision ?? 0
+    }
+
+    private func chineseRecognitionCourseActionsAvailability() -> ChineseRecognitionAvailability {
+        if isTerminating { return .unavailable("课程正在退出保存，暂不能修改字幕；保存结束后再试。") }
+        if archiveLoading { return .unavailable("课程正在读取或切换，暂不能修改字幕；等待结束后再试。") }
+        if alarmRolloverInProgress { return .unavailable("课程正在分段保存，暂不能修改字幕；保存结束后再试。") }
+        if finalizationInProgress || !chineseRecognitionLifecycleOwners.isEmpty {
+            return .unavailable("课程正在切换或保存，暂不能修改字幕；等待结束后再试。")
+        }
+        guard phase == .recording || phase == .paused || savedSessionDirectory != nil else {
+            return .unavailable("当前课程暂不能修改字幕，请在课堂中或打开已保存课程后操作。")
+        }
+        return .available
+    }
+
+    private func updateChineseRecognitionCourseActions() {
+        let availability = chineseRecognitionCourseActionsAvailability()
+        if chineseRecognitionState.courseActionsAvailability != availability {
+            chineseRecognitionState.courseActionsAvailability = availability
+        }
+    }
+
+    func chineseRecognitionUndoAvailability(_ id: UUID) -> ChineseRecognitionAvailability {
+        let course = chineseRecognitionCourseActionsAvailability()
+        guard course.isAvailable else { return course }
+        if chineseRecognitionState.statuses[id] == .saving {
+            return .unavailable("中文原文正在保存；保存完成后才能撤销。")
+        }
+        if chineseRecognitionTasks[id] != nil || pendingChineseRecognition[id] != nil {
+            return .unavailable("本句中文重识别仍在排队或处理中，请先取消或等待结束后撤销。")
+        }
+        guard let segment = segments.first(where: { $0.id == id }) else {
+            return .unavailable("课程或本句已更新，请重新打开字幕操作菜单。")
+        }
+        guard segment.canUndoChineseRecognition else {
+            return .unavailable("本句没有可撤销的中文识别结果，请重新打开字幕操作菜单。")
+        }
+        return .available
+    }
+
+    func chineseRecognitionAvailability(for segment: TranscriptSegment) -> ChineseRecognitionAvailability {
+        let course = chineseRecognitionCourseActionsAvailability()
+        guard course.isAvailable else { return course }
+        switch phase {
+        case .recording, .paused, .saved: break
+        default: return .unavailable("请在课堂进行中或打开已保存课程后重新识别。")
+        }
+        if activeStorageMode == .liveOnly {
+            return .unavailable("实时暂存模式结束后不会保留录音；请先切换为保存录音，再排队重新识别。")
+        }
+        guard segments.contains(where: { $0.id == segment.id && $0.inputRevision == segment.inputRevision }) else {
+            return .unavailable("本句已更新，请重新打开菜单。")
+        }
+        do {
+            _ = try ChineseRecognitionAudio.slice(segment: segment, directory: currentCourseDirectory,
+                ranges: sessionSnapshot?.audioRanges ?? [],
+                retainedChunks: pipeline.transcriptionWork().filter { $0.sessionID == sessionID })
+            return .available
+        } catch {
+            return .unavailable((error as? ChineseRecognitionAudio.Failure)?.localizedDescription
+                ?? "本句录音无法读取，暂时不能重新识别。")
+        }
+    }
+
+    func recognizeCaptionAsChinese(_ id: UUID) {
+        guard chineseRecognitionTasks[id] == nil, pendingChineseRecognition[id] == nil,
+              let input = segments.first(where: { $0.id == id }) else { return }
+        let availability = chineseRecognitionAvailability(for: input)
+        guard availability.isAvailable else {
+            chineseRecognitionState.statuses[id] = .failed(availability.reason ?? "本句录音不可用，原句未改。")
+            return
+        }
+        guard chineseRecognitionTasks.count + pendingChineseRecognition.count < 8 else {
+            chineseRecognitionState.statuses[id] = .failed("中文重识别等待队列已满，请稍后再试；原句未改。")
+            return
+        }
+        // MLX inference cannot be safely preempted. Keep manual work outside
+        // both admission queues for the entire resumable capture session.
+        if phase == .recording || phase == .paused {
+            pendingChineseRecognition[id] = input
+            chineseRecognitionState.statuses[id] = .waitingForRealtime
+            return
+        }
+        let identity = sessionID, epoch = generation, token = UUID()
+        chineseRecognitionTokens[id] = token
+        chineseRecognitionState.statuses[id] = .recognizing
+        chineseRecognitionTasks[id] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var clip: URL?
+            defer {
+                if let clip { try? FileManager.default.removeItem(at: clip) }
+                self.retiredChineseRecognitionTasks[token] = nil
+                if self.chineseRecognitionTokens[id] == token {
+                    self.chineseRecognitionTasks[id] = nil
+                    self.chineseRecognitionTokens[id] = nil
+                }
+            }
+            do {
+                let slice = try ChineseRecognitionAudio.slice(segment: input, directory: self.currentCourseDirectory,
+                    ranges: self.sessionSnapshot?.audioRanges ?? [],
+                    retainedChunks: self.pipeline.transcriptionWork().filter { $0.sessionID == identity })
+                let scratch = try SessionWorkspace.temporaryRoot()
+                let audio = try await Task.detached { try slice.extract(to: scratch) }.value
+                clip = audio
+                try Task.checkCancellation()
+                let result = try await self.chineseRecognition.recognize(audio, "chinese-" + token.uuidString)
+                try Task.checkCancellation()
+                guard self.sessionID == identity, self.generation == epoch,
+                      self.chineseRecognitionTokens[id] == token else { return }
+                guard !self.isTerminating, !self.archiveLoading, !self.alarmRolloverInProgress,
+                      !self.finalizationInProgress, self.chineseRecognitionLifecycleOwners.isEmpty,
+                      self.phase == .recording || self.phase == .paused || self.savedSessionDirectory != nil else {
+                    self.chineseRecognitionState.statuses[id] = .cancelled
+                    return
+                }
+                guard let index = self.segments.firstIndex(where: {
+                          $0.id == id && $0.inputRevision == input.inputRevision && $0.english == input.english
+                              && $0.sourceLanguage == input.sourceLanguage
+                      }) else {
+                    self.chineseRecognitionState.statuses[id] = .failed("本句已更新，未使用这次识别结果；请重新查看后再试。")
+                    return
+                }
+                guard result.languageMode == .chinese, result.language == "zh", result.decode == .forced,
+                      result.policy == 1, !result.truncated, (0..<256).contains(result.generatedTokens),
+                      let language = SpokenLanguage.find("zh"),
+                      SourceQualityGate.fallbackReason(for: result.text, language: language,
+                        audioDuration: slice.duration) == nil else { throw QwenRuntimeError.invalidResponse }
+                // Translation may complete while recognition is running. Preserve
+                // the latest old caption, not a stale in-flight translation draft.
+                var replacement = self.segments[index]
+                replacement.applyChineseRecognition(result.text)
+                if self.sessionSaver == nil, let directory = self.currentCourseDirectory,
+                   let snapshot = self.sessionSnapshot { self.bindSessionArchive(to: directory, restored: snapshot) }
+                self.cancelInitialTranslationRequest(id)
+                self.replaceExistingSegment(at: index, with: replacement, reason: "用户按中文重新识别")
+                self.chineseRecognitionState.statuses[id] = .saving
+                self.markCaptionActivity()
+                self.scheduleSummaryRefresh(force: self.summaryRefreshRequested)
+                let saved = await self.synchronizeChineseRecognitionArchive(session: identity, epoch: epoch)
+                guard self.sessionID == identity, self.generation == epoch,
+                      self.chineseRecognitionTokens[id] == token else { return }
+                self.chineseRecognitionState.statuses[id] = saved ? .completed
+                    : .failed("中文原文已保留，但存档或导出尚未保存完成；可以撤销，或重试保存。")
+            } catch {
+                guard self.sessionID == identity, self.generation == epoch,
+                      self.chineseRecognitionTokens[id] == token else { return }
+                if error is CancellationError || Task.isCancelled {
+                    self.chineseRecognitionState.statuses[id] = .cancelled
+                } else {
+                    self.chineseRecognitionState.statuses[id] = .failed("按中文重新识别失败，原句未改。"
+                        + LearningFailureCode.label(for: LearningFailureCode.code(for: error)))
+                }
+            }
+        }
+    }
+
+    func cancelChineseRecognition(_ id: UUID) {
+        if pendingChineseRecognition.removeValue(forKey: id) != nil {
+            chineseRecognitionState.statuses[id] = .cancelled
+            return
+        }
+        guard chineseRecognitionState.statuses[id] == .recognizing else { return }
+        if let token = chineseRecognitionTokens[id], let task = chineseRecognitionTasks[id] {
+            retiredChineseRecognitionTasks[token] = task
+        }
+        chineseRecognitionTasks[id]?.cancel()
+        chineseRecognitionTokens[id] = nil
+        chineseRecognitionTasks[id] = nil
+        chineseRecognitionState.statuses[id] = .cancelled
+    }
+
+    private func startPendingChineseRecognition() {
+        guard case .saved = phase, !isTerminating, !archiveLoading,
+              !alarmRolloverInProgress, !finalizationInProgress,
+              chineseRecognitionLifecycleOwners.isEmpty,
+              noteSourceProducerDrained || processingPaused else { return }
+        let pending = pendingChineseRecognition
+        pendingChineseRecognition.removeAll()
+        for (id, input) in pending {
+            guard segments.contains(where: { $0.id == id && $0.inputRevision == input.inputRevision
+                && $0.english == input.english && $0.sourceLanguage == input.sourceLanguage }) else {
+                chineseRecognitionState.statuses[id] = .failed("本句已更新，未执行排队的重识别；请重新查看后再试。")
+                continue
+            }
+            recognizeCaptionAsChinese(id)
+        }
+    }
+
+    private func cancelAllChineseRecognition(preserveWaiting: Bool = false) {
+        if !preserveWaiting {
+            for id in pendingChineseRecognition.keys { chineseRecognitionState.statuses[id] = .cancelled }
+            pendingChineseRecognition.removeAll()
+        }
+        for (id, task) in chineseRecognitionTasks {
+            if let token = chineseRecognitionTokens[id] { retiredChineseRecognitionTasks[token] = task }
+            // A committed caption owns a storage writer, not cancellable
+            // recognition. Lifecycle changes must join its final receipt.
+            if chineseRecognitionState.statuses[id] == .saving { continue }
+            if chineseRecognitionState.statuses[id] == .recognizing { chineseRecognitionState.statuses[id] = .cancelled }
+            task.cancel()
+            chineseRecognitionTasks[id] = nil
+            chineseRecognitionTokens[id] = nil
+        }
+    }
+
+    private func waitForChineseRecognitionWriters() async throws {
+        cancelAllChineseRecognition(preserveWaiting: finalizationInProgress && !preparingApplicationExit)
+        let tasks = Array(retiredChineseRecognitionTasks.values) + Array(chineseRecognitionSyncTasks.values)
+        let deadline = applicationExitDeadline ?? ExitDeadline.current
+        for task in tasks { deadline?.track(task) }
+        for task in tasks {
+            try await waitForLifecycle { await task.value }
+        }
+        try await waitForLifecycle { [self] in try await chineseRecognition.waitForInference() }
+    }
+
+    func undoChineseRecognition(_ id: UUID) {
+        let availability = chineseRecognitionUndoAvailability(id)
+        guard availability.isAvailable else {
+            let reason = availability.reason ?? "当前暂不能撤销中文重识别，请稍后再试。"
+            chineseRecognitionUndoNotice = reason
+            archiveNotice = reason
+            return
+        }
+        guard let index = segments.firstIndex(where: { $0.id == id }) else {
+            archiveNotice = "课程或本句已更新，请重新打开字幕操作菜单。"
+            return
+        }
+        var replacement = segments[index]
+        guard replacement.undoChineseRecognition() else {
+            archiveNotice = "本句没有可撤销的中文识别结果，请重新打开字幕操作菜单。"
+            return
+        }
+        if archiveNotice == chineseRecognitionUndoNotice { archiveNotice = nil }
+        chineseRecognitionUndoNotice = nil
+        replaceExistingSegment(at: index, with: replacement, reason: "用户撤销中文重新识别")
+        chineseRecognitionState.statuses[id] = nil
+        let identity = sessionID, epoch = generation, syncID = UUID()
+        chineseRecognitionSyncTasks[syncID] = Task { [weak self] in
+            guard let self else { return }
+            defer { self.chineseRecognitionSyncTasks[syncID] = nil }
+            await self.synchronizeChineseRecognitionArchive(session: identity, epoch: epoch)
+        }
+        if !processingPaused { drainTranslationQueue() }
+    }
+
+    @discardableResult
+    private func synchronizeChineseRecognitionArchive(session identity: UUID, epoch: Int) async -> Bool {
+        while chineseRecognitionExportInProgress {
+            try? await Task.sleep(for: .milliseconds(20))
+            guard !Task.isCancelled, sessionID == identity, generation == epoch else { return false }
+        }
+        guard sessionID == identity, generation == epoch, let directory = currentCourseDirectory else { return false }
+        chineseRecognitionExportInProgress = true
+        defer { chineseRecognitionExportInProgress = false }
+        do {
+            #if DEBUG
+            try await chineseRecognitionArchiveBarrierForTesting?()
+            #endif
+            try await flushSessionArchive()
+            guard sessionID == identity, generation == epoch else { return false }
+            let captions = segments, notes = lectureSummary, target = outputLanguage
+            let legacy = summaryIsLegacyRendered, evidence = notesScheduleEvidence, converter = chineseScriptConverter
+            try await Task.detached {
+                try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target,
+                    summaryIsLegacyRendered: legacy, summaryEvidence: evidence, converter: converter)
+            }.value
+            return true
+        } catch {
+            guard sessionID == identity, generation == epoch else { return false }
+            archiveError = "字幕修订已保留，但存档或导出尚未保存完成；请重试保存。"
+            return false
+        }
     }
 
     func acceptTranscriptionCandidate(_ id: UUID, editedText: String, expectedOriginal: String,
@@ -3445,12 +4587,37 @@ final class AppModel: ObservableObject {
         case let .volatile(text, start, end, observedAt):
             tracePreviewReceiveHop(ProcessInfo.processInfo.systemUptime - observedAt)
             if text.isEmpty {
-                guard emptyPreviewOwnsCurrentRange(start: start, end: end) else { return }
+                guard resolveCurrentPreview(start: start, end: end) else { return }
             }
             volatileEnglish = text
             if !text.isEmpty, start.isFinite, end.isFinite, start >= 0, end > start {
                 volatileRangeStart = start
                 volatileRangeEnd = end
+                // Streaming windows can include an already confirmed prefix.
+                // Finals remain authoritative across deliveries; prior silence
+                // does not. Only matching text makes complete seeded coverage
+                // evidence of a late duplicate, for both main/floating readers.
+                let covering = segments.filter {
+                    $0.startTime.isFinite && $0.endTime.isFinite && $0.startTime >= 0
+                        && $0.endTime > $0.startTime && $0.endTime > start && $0.startTime < end
+                }
+                var fullyResolved = false
+                for segment in covering {
+                    if resolveCurrentPreview(start: segment.startTime, end: segment.endTime) {
+                        fullyResolved = true
+                    }
+                }
+                if fullyResolved {
+                    let previewTokens = Self.previewComparisonTokens(text)
+                    let finalTokens = Self.previewComparisonTokens(covering.map(\.english).joined(separator: " "))
+                    if !previewTokens.isEmpty && previewTokens == finalTokens {
+                        volatileEnglish = ""
+                    } else {
+                        // Conflicting full coverage cannot own this new text or
+                        // make a later partial silence look fully resolved.
+                        volatileResolvedRanges.removeAll(keepingCapacity: true)
+                    }
+                }
             }
             // Preview updates do not use the translation model. Let a summary
             // finish unless caption backlog or memory pressure requires yielding.
@@ -3506,11 +4673,21 @@ final class AppModel: ObservableObject {
                 initialSourceRevisionInputs[result.id] = initial
             }
             appendConfirmedCaption(initial, hints: result.hints)
+        case .alarmSound(let observation):
+            receiveAlarmSound(observation)
+        case .alarmAnalysisUnavailable:
+            alarmDetectionNotice = "警报声检测暂不可用；录音与字幕继续。请以现场安全设备和广播为准。"
+            alarmRule.clearEvidence()
         case .processing(let state):
             guard state.sessionID == sessionID else { return }
             transcriptionProcessing = state
             if var snapshot = sessionSnapshot {
-                let work = pipeline.transcriptionWork()
+                // An old processing event can already be enqueued on the main
+                // actor when capture switches. Read that course's parked queue,
+                // rather than borrowing the new recording's frame ranges.
+                let oldQueue = alarmPreviousQueue?.state?.sessionID == state.sessionID ? alarmPreviousQueue : nil
+                let work = oldQueue?.records ?? pipeline.transcriptionWork()
+                let capturing = oldQueue?.state?.isCapturing ?? state.isCapturing
                 let interruptions = snapshot.audioRanges.filter { $0.interruptionReason != nil }
                 snapshot.audioRanges = work.map { record in
                     SessionAudioRange(id: record.id, segmentID: record.id,
@@ -3524,7 +4701,7 @@ final class AppModel: ObservableObject {
                     if !snapshot.audioFiles.isEmpty {
                         snapshot.audioFiles[0].frameCount = last.endFrame
                         snapshot.audioFiles[0].sampleRate = last.sampleRate
-                        snapshot.audioFiles[0].isFinalized = !state.isCapturing
+                        snapshot.audioFiles[0].isFinalized = !capturing
                     }
                 }
                 sessionSnapshot = snapshot
@@ -3553,6 +4730,8 @@ final class AppModel: ObservableObject {
             sessionNotice = Self.rejectedTranscriptNotice
         case let .transcriptionIssue(start, end, message):
             sessionNotice = "\(Self.transcriptionNoticeRange(start, end)) · \(message)"
+        case let .transcriptionIssueResolved(start, end):
+            if sessionNotice?.hasPrefix(Self.transcriptionNoticeRange(start, end) + " · ") == true { sessionNotice = nil }
         case let .nonEnglishSpeech(start, end):
             // An earlier attempt's warning for this range no longer applies.
             if sessionNotice?.hasPrefix(Self.transcriptionNoticeRange(start, end) + " · ") == true { sessionNotice = nil }
@@ -3584,7 +4763,8 @@ final class AppModel: ObservableObject {
             segment.updateCaptionAnnotation(targetCode: target.rawValue,
                 formulaUncertain: (segment.sourceLanguage == nil || segment.sourceLanguage == "en") && FormulaASRReview.uncertain(segment.english))
             if sessionNotice == Self.rejectedTranscriptNotice { sessionNotice = nil }
-            if !previewOutlivesFinal(endingAt: segment.endTime) { volatileEnglish = "" }
+            let previewResolved = resolveCurrentPreview(start: segment.startTime, end: segment.endTime)
+            if previewResolved || !previewOutlivesFinal(endingAt: segment.endTime) { volatileEnglish = "" }
             markCaptionActivity()
             segments.append(segment)
             segments.sort { $0.startTime == $1.startTime ? $0.id.uuidString < $1.id.uuidString : $0.startTime < $1.startTime }
@@ -3757,10 +4937,12 @@ final class AppModel: ObservableObject {
     func loadPresentationForTesting(phase: AppPhase, evidence: [TranscriptSegment],
                                     notebook: LearningNotebook = .init(), notice: String? = nil,
                                     preview: String = "", processing: TranscriptionProcessingState? = nil,
-                                    outputLanguage: OutputLanguage? = nil) {
+                                    outputLanguage: OutputLanguage? = nil,
+                                    storageMode: SessionStorageMode? = nil) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         precondition(!noteReviewQueue.hasWork && translationWorker == nil)
         if let outputLanguage { self.outputLanguage = outputLanguage }
+        if let storageMode { self.activeStorageMode = storageMode }
         self.phase = phase
         self.segments = evidence
         if let processing { self.transcriptionProcessing = processing }
@@ -3819,6 +5001,11 @@ final class AppModel: ObservableObject {
         sessionSaver?.onFailure?(error)
     }
     var translationTaskForTesting: Task<Void, Never>? { translationWorker }
+    func chineseRecognitionTaskForTesting(_ id: UUID) -> Task<Void, Never>? { chineseRecognitionTasks[id] }
+    func synchronizeChineseRecognitionExportsForTesting() async {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        await synchronizeChineseRecognitionArchive(session: sessionID, epoch: generation)
+    }
     var translationQueueForTesting: [UUID] { translationQueue }
     var translationEnqueuedAtForTesting: [UUID: TimeInterval] { translationEnqueuedAt }
     func restorePendingCaptionWorkForTesting() {
@@ -3827,6 +5014,10 @@ final class AppModel: ObservableObject {
     }
     var hasCaptionBacklogForTesting: Bool { hasCaptionBacklog }
     var captionWorkPendingForTesting: Bool { captionWorkPending }
+    func drainCaptionQueueForTesting() {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        drainTranslationQueue()
+    }
     func receiveIdentifiedCaptionForTesting(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint] = []) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         appendConfirmedCaption(segment, hints: hints)
@@ -3857,6 +5048,7 @@ final class AppModel: ObservableObject {
         scheduleSummaryRefresh(force: force)
     }
     var summaryTaskForTesting: Task<Void, Never>? { summaryTask }
+    var conversionRecoveryTaskForTesting: Task<Void, Never>? { conversionRecoveryTask }
     var summaryWakeTaskForTesting: Task<Void, Never>? { summaryScheduleTask }
     var learningNotebookForTesting: LearningNotebook { learningNotebook }
     var savedProcessingTaskForTesting: Task<Void, Never>? { processingTask }
@@ -3915,7 +5107,8 @@ final class AppModel: ObservableObject {
                                      at previousIndex: Int, started: TimeInterval) {
         if let revised = result.previous,
            self.segments.indices.contains(previousIndex) {
-            let normalized = captionTarget.normalize(revised)
+            let normalized = captionTarget.normalize(self.segments[previousIndex]
+                .translationPreservingIsolatedI(revised, targetCode: captionTarget.rawValue))
             // 2026-09-18：相邻修复**一次处理两段** ✗，模型多回半句就会把两段内容
             // 塞进前一段 ✗（缺陷文档 round-359 的收敛结论 ✓）。
             // 因此：修复结果若相对**前一段自己的英文**长得离谱 ✗，就**丢弃这次修复** ✓
@@ -3931,7 +5124,7 @@ final class AppModel: ObservableObject {
             if repairPlausible, !normalized.isEmpty, self.segments[previousIndex].chinese != normalized {
                 let previousID = self.segments[previousIndex].id
                 var revisedSegment = self.segments[previousIndex]
-                revisedSegment.completeTranslation(normalized)
+                revisedSegment.completeTranslation(normalized, targetCode: captionTarget.rawValue)
                 self.replaceExistingSegment(at: previousIndex, with: revisedSegment,
                     reason: "相邻语句补全译文")
                 Self.traceTranslation("adjacent_repair", id: previousID,
@@ -4030,6 +5223,8 @@ final class AppModel: ObservableObject {
     }
 
     private func drainTranslationQueue() {
+        if let foreground = alarmForegroundModel, foreground.hasActiveSession,
+           foreground.captionWorkPending || foreground.hasCaptionBacklog { return }
         guard !preparingApplicationExit, applicationExitDeadline?.isExpired != true,
               !processingPaused, !manualRequestInFlight, !captionWorkerShouldYieldToManual,
               (summaryTask == nil || summaryConcurrencyAllowed),
@@ -4087,8 +5282,8 @@ final class AppModel: ObservableObject {
                     }
                 }
                 let target = self.captionTarget
-                if target.keepsSourceAsCaption(language: input.sourceLanguage) {
-                    let rendered = target.renderPassThrough(input.english)
+                if input.isChineseOriginal || target.keepsSourceAsCaption(language: input.sourceLanguage) {
+                    let rendered = input.isChineseOriginal ? input.english : target.renderPassThrough(input.english)
                     self.segments[index].completeTranslation(rendered, targetCode: target.rawValue)
                     self.segments[index].updateCaptionAnnotation(targetCode: target.rawValue,
                         formulaUncertain: (input.sourceLanguage == nil || input.sourceLanguage == "en")
@@ -4099,6 +5294,7 @@ final class AppModel: ObservableObject {
                     self.scheduleSummaryRefresh(force: self.summaryRefreshRequested)
                     continue
                 }
+                self.cancelInitialTranslationRequest(id)
                 self.segments[index].beginTranslation()
                 let english = self.segments[index].english
                 let recentContext = self.recentTranslationContext(before: index)
@@ -4192,7 +5388,7 @@ final class AppModel: ObservableObject {
                             Self.traceTranslation("rejected", id: id,
                                                   elapsed: ProcessInfo.processInfo.systemUptime - started,
                                                   detail: reason)
-                            throw QwenRuntimeError.translationRejected("译文未通过验收（\(reason)），已保留英文行等待重试。")
+                            throw QwenRuntimeError.translationRejected("译文未通过验收（\(reason)），已保留英文行等待重试。", rejection: pair.currentRejectionCode)
                         }
                         response = acceptedCurrent
                     } else {
@@ -4257,14 +5453,14 @@ final class AppModel: ObservableObject {
                     self.reviewConcurrency.observe(elapsed: 0, successful: false)
                     var reason = TranscriptSegment.TranslationFailureReason.category(for: error)
                     var transportFailuresOnly = Self.isTransportFailure(reason)
-                    self.recordCaptionTranslationFailure(reason, at: failureIndex)
+                    self.recordCaptionTranslationFailure(reason, rejection: (error as? QwenRuntimeError)?.translationRejection, at: failureIndex)
                     var recovered: String?
                     // One bounded recovery, owned by the same caption revision.
                     // Content failures change instructions; output-limit failures
                     // increase the budget; transient or unclassified runtime errors
                     // retain one ordinary retry.
                     if !self.rescuedTransportCaptionIDs.contains(id),
-                       let attempt = CaptionTranslationAttempt.recovery(for: error) {
+                       let attempt = CaptionTranslationAttempt.recovery(for: error, target: target) {
                         Self.traceTranslation("retry_\(attempt.rawValue)", id: id,
                                               elapsed: ProcessInfo.processInfo.systemUptime - started)
                         do {
@@ -4287,7 +5483,7 @@ final class AppModel: ObservableObject {
                                 session: currentSession, epoch: currentGeneration, worker: workerID) else { continue }
                             reason = TranscriptSegment.TranslationFailureReason.category(for: error)
                             transportFailuresOnly = transportFailuresOnly && Self.isTransportFailure(reason)
-                            self.recordCaptionTranslationFailure(reason, at: currentIndex)
+                            self.recordCaptionTranslationFailure(reason, rejection: (error as? QwenRuntimeError)?.translationRejection, at: currentIndex)
                         }
                     }
                     guard !Task.isCancelled, currentGeneration == self.generation,
@@ -4305,7 +5501,7 @@ final class AppModel: ObservableObject {
                         } catch {
                             reason = TranscriptSegment.TranslationFailureReason.category(for: error)
                             transportFailuresOnly = false
-                            self.recordCaptionTranslationFailure(reason, at: currentIndex)
+                            self.recordCaptionTranslationFailure(reason, rejection: (error as? QwenRuntimeError)?.translationRejection, at: currentIndex)
                         }
                     }
                     if let accepted {
@@ -4323,10 +5519,17 @@ final class AppModel: ObservableObject {
                                               detail: reason.rawValue)
                         self.segments[currentIndex].finishFailedTranslation()
                         self.segments[currentIndex].updateCaptionAnnotation(targetCode: target.rawValue)
+                        if target == .simplifiedChinese, sourceLanguage == nil || sourceLanguage == "en",
+                           self.segments[currentIndex].modelDidNotTranslate,
+                           self.segments[currentIndex].initialTranslationFallback == nil {
+                            self.scheduleInitialTranslationFallback(input, at: currentIndex, target: target)
+                        }
                         if transportFailuresOnly, !self.rescuedTransportCaptionIDs.contains(id) {
                             self.failedTransportCaptions[id] = (input, self.captionTranslationSuccessCount)
                         }
-                        self.liveChinese = self.segments[currentIndex].displayChinese
+                        guard let displayIndex = self.translationInputIndex(input, session: currentSession,
+                            epoch: currentGeneration, worker: workerID) else { continue }
+                        self.liveChinese = self.segments[displayIndex].displayChinese
                     }
                     self.persistCurrentSession()
                 }
@@ -4358,12 +5561,18 @@ final class AppModel: ObservableObject {
         latencyLog.notice("stop stage=\(stage, privacy: .public) elapsed_ms=\(milliseconds)")
     }
 
-    private func recordCaptionTranslationFailure(_ reason: TranscriptSegment.TranslationFailureReason, at index: Int) {
-        segments[index].recordTranslationFailure(reason)
+    private func recordCaptionTranslationFailure(_ reason: TranscriptSegment.TranslationFailureReason,
+                                                rejection: TranslationAcceptance.Rejection? = nil, at index: Int) {
+        segments[index].recordTranslationFailure(reason, rejection: rejection)
         let count = segments[index].translationFailures.last!.count
-        Self.latencyLog.notice("caption_failure reason=\(reason.rawValue, privacy: .public) count=\(count)")
+        let code = segments[index].translationFailures.last!.rejection?.rawValue ?? "unspecified"
+        Self.latencyLog.notice("caption_failure reason=\(reason.rawValue, privacy: .public) rejection=\(code, privacy: .public) count=\(count)")
         #if LIVELINGO_CLI
-        translationFailureReporter?(["translationFailureReason": reason.rawValue, "translationFailureCount": count])
+        var fields: [String: Any] = ["translationFailureReason": reason.rawValue, "translationFailureCount": count]
+        if let rejection = segments[index].translationFailures.last!.rejection {
+            fields["translationRejection"] = rejection.rawValue
+        }
+        translationFailureReporter?(fields)
         #endif
         persistCurrentSession()
     }
@@ -4396,6 +5605,80 @@ final class AppModel: ObservableObject {
         // Runtime errors can embed source text or paths. Details remain in the
         // UI state; ordinary logging records only their presence.
         latencyLog.notice("caption event=\(event, privacy: .public) id=\(id.uuidString, privacy: .public) elapsed_ms=\(milliseconds) has_diagnostic=\(detail != nil)")
+    }
+
+    private func initialTranslationCacheKey(_ source: String) -> String {
+        "\(sessionID.uuidString)|\(generation)|\(source.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+
+    private func cancelInitialTranslationRequest(_ id: UUID) {
+        let pending = initialTranslationRequests.removeValue(forKey: id)
+        pending?.request.cancel()
+    }
+
+    private func cancelInitialTranslationRequests() {
+        let pending = initialTranslationRequests.values.map(\.request)
+        initialTranslationRequests.removeAll()
+        for request in pending { request.cancel() }
+    }
+
+    private func scheduleInitialTranslationFallback(_ input: TranscriptSegment, at index: Int,
+                                                     target: CaptionTranslationTarget) {
+        let source = input.english.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cached = initialTranslationCache[initialTranslationCacheKey(source)]
+        // Save the attempt before starting, including its failure/timeout state.
+        segments[index].recordInitialTranslationFallback(cached, targetCode: target.rawValue)
+        guard cached == nil else { return }
+        let identity = sessionID, epoch = generation, token = UUID()
+        let request = InitialTranslationRequest()
+        initialTranslationRequests[input.id] = (token, request)
+        request.start(source: source,
+            translate: preparedInitialTranslation ?? captionTranslation.initialTranslation,
+            deadline: captionTranslation.initialTranslationDeadline) { [weak self] text in
+                guard let self, self.initialTranslationRequests[input.id]?.token == token else { return }
+                self.initialTranslationRequests.removeValue(forKey: input.id)
+                guard self.sessionID == identity, self.generation == epoch, !self.processingPaused,
+                      self.captionTarget == target,
+                      let current = self.segments.firstIndex(where: {
+                          $0.id == input.id && $0.inputRevision == input.inputRevision
+                              && $0.english == input.english && $0.sourceLanguage == input.sourceLanguage
+                      }), self.segments[current].modelDidNotTranslate else { return }
+                if let text, let usable = try? TranslationAcceptance.validatedCaption(
+                    target.normalize(text), source: source, target: target) {
+                    self.segments[current].completeInitialTranslationFallback(usable, targetCode: target.rawValue)
+                    self.persistCurrentSession()
+                }
+                // Publish terminal failures too: the live preview observes
+                // captionStream, while removing the pending request is private.
+                if self.segments.last?.id == input.id, self.volatileEnglish.isEmpty {
+                    self.liveChinese = self.segments[current].displayChinese
+                    self.captionStream.objectWillChange.send()
+                }
+            }
+    }
+
+    var failedInitialTranslationCaption: TranscriptSegment? {
+        guard volatileEnglish.isEmpty, captionTarget == .simplifiedChinese,
+              let caption = segments.last, caption.modelDidNotTranslate,
+              caption.initialTranslationFallback?.targetCode == captionTarget.rawValue,
+              caption.initialTranslationDisplay == nil,
+              initialTranslationRequests[caption.id] == nil else { return nil }
+        return caption
+    }
+
+    // Final exports and CLI/test readback drain bounded display work after
+    // formal captions finish. Caption processing and notes never await it.
+    func waitForInitialTranslations() async {
+        let requests = initialTranslationRequests.values.map(\.request)
+        for request in requests { await request.wait() }
+    }
+
+    func rememberInitialTranslation(source: String, translated: String) {
+        let source = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty, captionTarget == .simplifiedChinese,
+              let text = try? TranslationAcceptance.validatedCaption(translated, source: source) else { return }
+        if initialTranslationCache.count >= 64 { initialTranslationCache.removeAll(keepingCapacity: true) }
+        initialTranslationCache[initialTranslationCacheKey(source)] = text
     }
 
     private static func previewMilliseconds(_ value: TimeInterval) -> Int {
@@ -4623,7 +5906,8 @@ final class AppModel: ObservableObject {
                 guard ids.isDisjoint(with: summarizedSegmentIDs),
                       draft.matches(evidence: segments.filter { ids.contains($0.id) }, model: modelName,
                                     systemPrompt: LearningPrompts.generationPrompt(target: captionTarget,
-                                        recoveringAfterOutputLimit: captionTarget != .simplifiedChinese && summaryRecoveryCharacters != nil)),
+                                        recoveringAfterOutputLimit: captionTarget != .simplifiedChinese && summaryRecoveryCharacters != nil,
+                                        evidence: draft.evidence)),
                       sessionSnapshot.map({ draft.matches(snapshot: $0, model: modelName, systemPrompt: draft.systemPrompt) }) ?? true else { return nil }
                 return draft
             }
@@ -4664,7 +5948,8 @@ final class AppModel: ObservableObject {
                             pending: pending, target: captionTarget),
                         target: captionTarget,
                         systemPrompt: LearningPrompts.generationPrompt(target: captionTarget,
-                                        recoveringAfterOutputLimit: captionTarget != .simplifiedChinese && summaryRecoveryCharacters != nil),
+                                        recoveringAfterOutputLimit: captionTarget != .simplifiedChinese && summaryRecoveryCharacters != nil,
+                                        evidence: inputSnapshot),
                         pendingTargets: pending.map(\.id), contextRevision: learningNotebook.revision,
                         dependencyIDs: dependencies
                     )
@@ -4772,6 +6057,7 @@ final class AppModel: ObservableObject {
 
     private func updateReviewAvailability() {
         let recording = hasActiveSession || phase == .preparing || phase == .stopping
+            || (alarmForegroundModel?.hasActiveSession ?? false)
         if hasCaptionBacklog { reviewConcurrency.reset() }
         let capable = reviewConcurrency.allows(mode: selectedMode)
         let available = SummaryResourcePolicy.estimatedAvailableBytes() ?? 0
@@ -4803,8 +6089,9 @@ final class AppModel: ObservableObject {
     private func resourceContext(summaryRunning: Bool, continuingSummary: Bool,
                                  allowConcurrent: Bool? = nil) -> ResourceSchedulingPolicy.Context {
         .init(now: ProcessInfo.processInfo.systemUptime, memoryNormal: summaryMemoryPressureNormal,
-            captionBacklog: hasCaptionBacklog, captionPending: captionWorkPending,
-            recording: hasActiveSession || phase == .preparing || phase == .stopping,
+            captionBacklog: hasCaptionBacklog || (alarmForegroundModel?.hasCaptionBacklog ?? false),
+            captionPending: captionWorkPending || (alarmForegroundModel?.captionWorkPending ?? false),
+            recording: hasActiveSession || phase == .preparing || phase == .stopping || (alarmForegroundModel?.hasActiveSession ?? false),
             allowConcurrent: allowConcurrent ?? summaryConcurrencyAllowed, summaryRunning: summaryRunning,
             paused: processingPaused, lastSummaryStarted: lastSummaryCycleStartedUptime,
             continuingSummary: continuingSummary, lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled,
@@ -5147,12 +6434,18 @@ final class AppModel: ObservableObject {
         await stopSession(failure: message)
     }
 
-    private func finalizeSessionDirectoryIfNeeded(resumeAfterMigration: Bool = true) async throws -> URL {
+    private func finalizeSessionDirectoryIfNeeded(resumeAfterMigration: Bool = true,
+                                                parkedQueue: DurableTranscriptionQueue? = nil) async throws -> URL {
+        let chineseOwner = UUID()
+        chineseRecognitionLifecycleOwners.insert(chineseOwner)
+        defer { chineseRecognitionLifecycleOwners.remove(chineseOwner) }
         let revision = lifecycleRevision
         try validateLifecycleCompletion(revision)
+        try await waitForChineseRecognitionWriters()
         if let temporarySessionDirectory {
             guard let outputDirectory else { throw AppError.outputDirectoryMissing }
-            try await pauseTranscriptionForLifecycle()
+            if let parkedQueue { try await waitForLifecycle { try await parkedQueue.pause() } }
+            else { try await pauseTranscriptionForLifecycle() }
             let translation = translationWorker
             translation?.cancel()
             let summary = summaryTask
@@ -5322,7 +6615,7 @@ struct ProtectedChemistryTranslationInput: Sendable {
 
     func validatedRestore(in translatedText: String) throws -> String {
         if let reason = restorationFailure(in: translatedText) {
-            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason)。")
+            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason)。", rejection: .incompleteProse)
         }
         return restore(in: translatedText)
     }
@@ -5884,6 +7177,7 @@ extension AppModel {
         defer { translationFailureReporter = nil }
         for caption in captions { appendConfirmedCaption(caption, hints: []) }
         await translationWorker?.value
+        await waitForInitialTranslations()
     }
     #endif
 
@@ -5911,14 +7205,15 @@ extension AppModel {
         phase = .recording
         let poll = Task { @MainActor in
             while !Task.isCancelled, self.sessionID == identity, self.generation == epoch {
-                report("state", ["phase": self.phaseLabel, "sessionID": identity.uuidString,
+                report("state", TranscriptionProcessingState.addingNoSpeechStatistic([
+                    "phase": self.phaseLabel, "sessionID": identity.uuidString,
                     "segments": self.segments.count, "translated": self.completedTranslationCount,
                     "summarized": self.lastSummarizedSegmentCount,
                     "summaryRunning": self.summaryTask != nil, "concurrency": self.summaryConcurrencyAllowed,
                     "pendingTranscription": self.transcriptionProcessing?.pendingCount ?? 0,
                     "unresolvedTranscription": self.transcriptionProcessing?.unresolvedCount ?? 0,
                     "otherLanguageTranscription": self.transcriptionProcessing?.otherLanguageCount ?? 0,
-                    "summaryStatus": self.summaryStatus])
+                    "summaryStatus": self.summaryStatus], count: self.savedNoSpeechCount))
                 self.refreshSummaryConcurrency()
                 self.yieldSummaryToCaptions()
                 self.scheduleSummaryRefresh()
@@ -6037,12 +7332,13 @@ extension AppModel {
                 }
             }
             try await flushSessionArchive()
-            report("finished", ["phase": phaseLabel, "sessionID": identity.uuidString,
+            report("finished", TranscriptionProcessingState.addingNoSpeechStatistic([
+                "phase": phaseLabel, "sessionID": identity.uuidString,
                 "stopSeconds": ProcessInfo.processInfo.systemUptime - started, "segments": segments.count,
                 "translated": completedTranslationCount, "summarized": lastSummarizedSegmentCount,
                 "unresolvedTranscription": transcriptionProcessing?.unresolvedCount ?? 0,
                 "otherLanguageTranscription": transcriptionProcessing?.otherLanguageCount ?? 0,
-                "summaryStatus": summaryStatus])
+                "summaryStatus": summaryStatus], count: savedNoSpeechCount))
         } catch {
             poll.cancel(); preview.cancel()
             await pipeline.cancel()
@@ -6106,14 +7402,16 @@ extension AppModel {
                         refreshSummaryConcurrency()
                         yieldSummaryToCaptions()
                         scheduleSummaryRefresh()
-                        report("state", ["phase": phaseLabel, "sessionID": identity.uuidString,
+                        report("state", TranscriptionProcessingState.addingNoSpeechStatistic([
+                                         "phase": phaseLabel, "sessionID": identity.uuidString,
                                          "segments": segments.count, "translated": completedTranslationCount,
                                          "summarized": lastSummarizedSegmentCount,
                                          "summaryRunning": summaryTask != nil,
                                          "concurrency": summaryConcurrencyAllowed,
                                          "pendingTranscription": transcriptionProcessing?.pendingCount ?? 0,
                                          "unresolvedTranscription": transcriptionProcessing?.unresolvedCount ?? 0,
-                                         "otherLanguageTranscription": transcriptionProcessing?.otherLanguageCount ?? 0])
+                                         "otherLanguageTranscription": transcriptionProcessing?.otherLanguageCount ?? 0],
+                                         count: savedNoSpeechCount))
                         do { try await Task.sleep(for: .seconds(1)) } catch { return }
                     }
                 }
@@ -6146,9 +7444,10 @@ extension AppModel {
                 if let state = transcriptionProcessing, state.failedCount + state.candidateCount > 0 {
                     // Counts only. A segment can be both failed and awaiting a
                     // candidate; the overlap says how many are in both counts.
-                    report("transcription_unresolved", ["sessionID": identity.uuidString,
+                    report("transcription_unresolved", TranscriptionProcessingState.addingNoSpeechStatistic([
+                        "sessionID": identity.uuidString,
                         "failed": state.failedCount, "candidates": state.candidateCount,
-                        "failedWithCandidate": state.failedWithCandidateCount])
+                        "failedWithCandidate": state.failedWithCandidateCount], count: state.noSpeechCount))
                 }
                 // Same bounded, admission-gated notes completion as a live run,
                 // plus an explicit stall guard: a blocked admission must fail the
@@ -6242,11 +7541,12 @@ extension AppModel {
             let loaded = try await Task.detached { try store.loadDetailed() }.value
             guard let disk = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
             let audio = try AVAudioFile(forReading: directory.appendingPathComponent(SessionWorkspace.recordingFileName))
-            report("finished", ["phase": phaseLabel, "sessionID": sessionID.uuidString, "segments": segments.count,
+            report("finished", TranscriptionProcessingState.addingNoSpeechStatistic([
+                                "phase": phaseLabel, "sessionID": sessionID.uuidString, "segments": segments.count,
                                 "translated": completedTranslationCount, "summarized": lastSummarizedSegmentCount,
                                 "revision": disk.inputRevision, "batches": disk.batches.count,
                                 "otherLanguageTranscription": transcriptionProcessing?.otherLanguageCount ?? 0,
-                                "paused": processingPaused, "capture": isRecording])
+                                "paused": processingPaused, "capture": isRecording], count: savedNoSpeechCount))
             return LiveLingoCLI.CLIObservedSession(
                 sessionID: sessionID,
                 snapshot: disk,

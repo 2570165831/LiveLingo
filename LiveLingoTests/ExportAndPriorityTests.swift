@@ -1004,6 +1004,10 @@ final class ProcessingFocusTests: XCTestCase {
     /// 31，只有 .utility(20) 与 .background(4) 更低。因此“提高进程优先级”没有可做的空间，
     /// 专注模式只负责让后台复查为实时任务让路。
     func testSchedulingClassCeilingIsAlreadyReached() throws {
+        // The whole probe shares one bounded readiness budget. A heavily loaded
+        // host can take more than ten seconds to schedule an owned shell child;
+        // priority assertions still run only after the exact ready handshake.
+        let readinessDeadline = ContinuousClock.now.advanced(by: .seconds(60))
         func waitForReady(_ handle: FileHandle) throws {
             let descriptor = handle.fileDescriptor
             let originalFlags = fcntl(descriptor, F_GETFL)
@@ -1012,7 +1016,7 @@ final class ProcessingFocusTests: XCTestCase {
             }
             defer { _ = fcntl(descriptor, F_SETFL, originalFlags) }
             let expected = Data("ready\n".utf8)
-            let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+            let deadline = readinessDeadline
             var received = Data()
             while received.count < expected.count {
                 guard ContinuousClock.now < deadline else {

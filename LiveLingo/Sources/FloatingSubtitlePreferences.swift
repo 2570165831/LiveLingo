@@ -14,6 +14,14 @@ enum FloatingSubtitleDisplayMode: String, CaseIterable, Identifiable {
         case .sourceOnly: "仅原文"
         }
     }
+
+    var segmentTitle: String {
+        switch self {
+        case .bilingual: "双语"
+        case .translationOnly: "译文"
+        case .sourceOnly: "原文"
+        }
+    }
 }
 
 /// Additive preferences: old apps still read their original size preset.
@@ -28,6 +36,7 @@ struct FloatingSubtitlePreferences: DynamicProperty {
     @AppStorage private var storedDisplayMode: String
     @AppStorage private var storedOpacity: Double
     @AppStorage private var storedShowsAcrossSpaces: Bool
+    @AppStorage private var storedShowsOnRecordStart: Bool
 
     init(store: UserDefaults? = nil) {
         _legacyTextSize = AppStorage(wrappedValue: 24, "floatingTextSize", store: store)
@@ -37,6 +46,7 @@ struct FloatingSubtitlePreferences: DynamicProperty {
                                        "floatingDisplayMode", store: store)
         _storedOpacity = AppStorage(wrappedValue: 1, "floatingBackgroundOpacity", store: store)
         _storedShowsAcrossSpaces = AppStorage(wrappedValue: true, "floatingShowsAcrossSpaces", store: store)
+        _storedShowsOnRecordStart = AppStorage(wrappedValue: false, "floatingShowOnRecordStart", store: store)
     }
 
     var displayMode: FloatingSubtitleDisplayMode {
@@ -64,6 +74,11 @@ struct FloatingSubtitlePreferences: DynamicProperty {
     var showsAcrossSpaces: Bool {
         get { storedShowsAcrossSpaces }
         nonmutating set { storedShowsAcrossSpaces = newValue }
+    }
+
+    var showsOnRecordStart: Bool {
+        get { storedShowsOnRecordStart }
+        nonmutating set { storedShowsOnRecordStart = newValue }
     }
 
     var sizePreset: Double? {
@@ -98,6 +113,9 @@ struct FloatingSubtitlePreferences: DynamicProperty {
     var sizePresetBinding: Binding<Double?> {
         Binding(get: { sizePreset }, set: { sizePreset = $0 })
     }
+    var showsOnRecordStartBinding: Binding<Bool> {
+        Binding(get: { showsOnRecordStart }, set: { showsOnRecordStart = $0 })
+    }
 
     private func bounded(_ value: Double, to range: ClosedRange<Double>, fallback: Double) -> Double {
         value.isFinite ? min(range.upperBound, max(range.lowerBound, value)) : fallback
@@ -109,15 +127,28 @@ struct FloatingSubtitlePresentation: Equatable {
     struct Line: Equatable {
         let text: String
         let languageName: String?
+        let isPreview: Bool
+
+        init(text: String, languageName: String?, isPreview: Bool = false) {
+            self.text = text
+            self.languageName = languageName
+            self.isPreview = isPreview
+        }
     }
 
     let source: Line?
     let translation: Line?
 
     init(sourceText: String, translatedText: String, caption: CaptionPresentation?,
-         mode: FloatingSubtitleDisplayMode, hasUsableTranslation: Bool = true) {
+         mode: FloatingSubtitleDisplayMode, hasUsableTranslation: Bool = true,
+         isPreviewTranslation: Bool = false) {
         let language = caption?.languageName
         let sourceOnlyChinese = caption?.isSourceOnly == true
+        if sourceOnlyChinese && caption?.sourceLanguage == "zh" {
+            source = nil
+            translation = Line(text: translatedText, languageName: language)
+            return
+        }
         if mode == .translationOnly && !sourceOnlyChinese && !hasUsableTranslation {
             source = Line(text: sourceText, languageName: language)
             translation = nil
@@ -127,7 +158,8 @@ struct FloatingSubtitlePresentation: Equatable {
             ? nil : Line(text: sourceOnlyChinese ? translatedText : sourceText, languageName: language)
         translation = mode == .sourceOnly ? nil
             : Line(text: translatedText,
-                   languageName: mode == .translationOnly || sourceOnlyChinese ? language : nil)
+                   languageName: mode == .translationOnly || sourceOnlyChinese ? language : nil,
+                   isPreview: !sourceOnlyChinese && isPreviewTranslation)
     }
 }
 

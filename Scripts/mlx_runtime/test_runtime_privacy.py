@@ -157,7 +157,13 @@ class WorkerPrivacyTests(unittest.TestCase):
     def test_saved_pause_false_request_cancel_keeps_saved_bytes_and_hot_cache(self):
         with self.session() as (directory, worker):
             worker.send(**note_command('saved', 'slow'))
-            worker.wait_for('snapshot', 'saved')
+            receipt = worker.wait_for('snapshot', 'saved')
+            # The first snapshot precedes the first token. Pausing it can
+            # correctly leave an empty hot generation, which cannot satisfy
+            # the nonempty 'x' prefix below. Wait for actual synthetic output.
+            if not receipt['wire']:
+                receipt = worker.wait_for('snapshot', 'saved')
+            self.assertTrue(receipt['wire'].startswith('x'))
             worker.send('pause', id='saved')
             worker.wait_for('paused', 'saved')
             path = checkpoint_path(directory, 'slow')

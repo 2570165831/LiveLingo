@@ -1,14 +1,359 @@
 import AppKit
 import Combine
+import ObjectiveC
 import SwiftUI
 import XCTest
 @testable import LiveLingo
+
+@MainActor
+private final class CaptionFollowBindings {
+    var anchor: Binding<UUID?>?
+    var follow: Binding<Bool>?
+    func capture(anchor: Binding<UUID?>, follow: Binding<Bool>) {
+        self.anchor = anchor
+        self.follow = follow
+    }
+}
+
+/// The production history scroller hosted in a transparent, non-key window.
+/// Activation environments are injected; no real application is activated.
+@MainActor
+final class CaptionFollowLatestTests: XCTestCase {
+    func testNewCaptionFollowsInNonKeyWindow() async throws {
+        try await checkArrival(controlState: .active, phase: .active)
+    }
+
+    func testNewCaptionFollowsInInactiveApplication() async throws {
+        try await checkArrival(controlState: .inactive, phase: .inactive)
+    }
+
+    func testDeferredLayoutKeepsLatestOfSeveralBackgroundCaptions() async throws {
+        let fixture = try host(controlState: .inactive, phase: .background)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        try await readHistory(fixture)
+        // Several publications before the lazy stack next lays out, as when
+        // a covered window coalesces updates. No screen occlusion is performed.
+        fixture.state.ids += [UUID(), UUID(), UUID()]
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+    }
+
+    func testReplacingLatestWithoutChangingCountFollowsNewIdentity() async throws {
+        let fixture = try host(controlState: .inactive, phase: .inactive)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        try await readHistory(fixture)
+        fixture.state.ids[fixture.state.ids.count - 1] = UUID()
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+    }
+
+    func testBecomingKeyCatchesUpWithoutAnotherCaption() async throws {
+        let fixture = try host(controlState: .active, phase: .active)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        try await readHistory(fixture)
+        fixture.state.controlState = .key
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: fixture.window)
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+        XCTAssertFalse(fixture.window.isKeyWindow, "Key state is injected, never borrowed from the user")
+    }
+
+    func testBecomingActiveCatchesUpWithoutAnotherCaption() async throws {
+        let fixture = try host(controlState: .inactive, phase: .inactive)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        try await readHistory(fixture)
+        fixture.state.phase = .active
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+    }
+
+    func testNativeKeyNotificationOnlyFollowsTheOwningWindow() async throws {
+        let fixture = try host(controlState: .inactive, phase: .inactive)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        try await readHistory(fixture)
+        let other = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
+        other.alphaValue = 0
+        other.isReleasedWhenClosed = false
+        defer { other.close() }
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: other)
+        try await settle(fixture)
+        XCTAssertGreaterThan(try scrollView(fixture).contentView.bounds.minY, 150)
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: fixture.window)
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+        XCTAssertFalse(fixture.window.isKeyWindow)
+    }
+
+    func testNativeApplicationActivationNotificationCatchesUpWithoutActivating() async throws {
+        let fixture = try host(controlState: .inactive, phase: .inactive)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        try await readHistory(fixture)
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApplication.shared)
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+        XCTAssertFalse(NSApplication.shared.isActive)
+    }
+
+    func testDisabledFollowPreservesVisibleHistoryThroughInsertionAndFocus() async throws {
+        let fixture = try host(controlState: .inactive, phase: .inactive)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        fixture.state.follow = false
+        try await settle(fixture)
+        try await readHistory(fixture)
+        let oldID = fixture.state.ids[fixture.state.ids.count - 4]
+        let before = try rowFrame(oldID, in: fixture)
+        fixture.state.ids.append(UUID())
+        try await settle(fixture)
+        XCTAssertEqual(try rowFrame(oldID, in: fixture).minY, before.minY, accuracy: 2)
+        fixture.state.controlState = .key
+        fixture.state.phase = .active
+        try await settle(fixture)
+        XCTAssertEqual(try rowFrame(oldID, in: fixture).minY, before.minY, accuracy: 2)
+        XCTAssertFalse(fixture.state.follow)
+        fixture.state.follow = true
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+    }
+
+    func testManualHistoryScrollDoesNotTurnFollowOffOrImmediatelySnapBack() async throws {
+        let fixture = try host(controlState: .inactive, phase: .inactive)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        try await readHistory(fixture)
+        XCTAssertTrue(fixture.state.follow)
+        let offset = try scrollView(fixture).contentView.bounds.minY
+        try await settle(fixture)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, offset, accuracy: 2)
+        fixture.state.ids.append(UUID())
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+        XCTAssertTrue(fixture.state.follow)
+    }
+
+    private func checkArrival(controlState: ControlActiveState, phase: ScenePhase) async throws {
+        let fixture = try host(controlState: controlState, phase: phase)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+        try await readHistory(fixture)
+        fixture.state.ids.append(UUID())
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+        XCTAssertFalse(fixture.window.isKeyWindow)
+        XCTAssertEqual(fixture.window.alphaValue, 0)
+    }
+
+    private struct Fixture {
+        let state: CaptionFollowFixtureState
+        let window: NSWindow
+        let view: NSView
+    }
+
+    private func host(controlState: ControlActiveState, phase: ScenePhase) throws -> Fixture {
+        XCTAssertTrue(AppRuntimeEnvironment.isUnitTesting)
+        XCTAssertTrue(UnitTestPresentationSafety.isInstalled)
+        let state = CaptionFollowFixtureState(controlState: controlState, phase: phase)
+        let controller = NSHostingController(rootView: CaptionFollowFixtureView(state: state).frame(width: 640, height: 280))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 280),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.contentViewController = controller
+        window.setContentSize(NSSize(width: 640, height: 280))
+        window.orderBack(nil)
+        XCTAssertFalse(window.isKeyWindow)
+        XCTAssertEqual(window.alphaValue, 0)
+        return Fixture(state: state, window: window, view: controller.view)
+    }
+
+    private func settle(_ fixture: Fixture) async throws {
+        fixture.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(160))
+        fixture.view.layoutSubtreeIfNeeded()
+        // This renders the view alone, never the display or other windows.
+        let bitmap = try XCTUnwrap(fixture.view.bitmapImageRepForCachingDisplay(in: fixture.view.bounds))
+        fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
+        try await Task.sleep(for: .milliseconds(80))
+        fixture.view.layoutSubtreeIfNeeded()
+    }
+
+    private func descendants(_ view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap { descendants($0) }
+    }
+
+    private func scrollView(_ fixture: Fixture) throws -> NSScrollView {
+        try XCTUnwrap(descendants(fixture.view).compactMap { $0 as? NSScrollView }.first)
+    }
+
+    private func readHistory(_ fixture: Fixture) async throws {
+        let scroll = try scrollView(fixture)
+        // Inject the same binding write SwiftUI makes for a user's history scroll.
+        fixture.state.anchor = fixture.state.ids[fixture.state.ids.count - 4]
+        try await settle(fixture)
+        XCTAssertGreaterThan(scroll.contentView.bounds.minY, 150, "The precondition must actually leave the newest row")
+    }
+
+    private func rowFrame(_ id: UUID, in fixture: Fixture) throws -> NSRect {
+        let row = try XCTUnwrap(descendants(fixture.view).first { $0.identifier?.rawValue == id.uuidString })
+        return fixture.view.convert(row.bounds, from: row)
+    }
+
+    private func assertLatestVisible(_ fixture: Fixture, file: StaticString = #filePath, line: UInt = #line) async throws {
+        let scroll = try scrollView(fixture)
+        XCTAssertEqual(scroll.contentView.bounds.minY, 0, accuracy: 2, file: file, line: line)
+        let latest = try XCTUnwrap(fixture.state.ids.last)
+        for _ in 0..<4 {
+            if let probe = descendants(fixture.view).first(where: { $0.identifier?.rawValue == latest.uuidString }) {
+                let frame = fixture.view.convert(probe.bounds, from: probe)
+                let viewport = fixture.view.convert(scroll.contentView.bounds, from: scroll.contentView)
+                if viewport.intersects(frame) { break }
+            }
+            try await settle(fixture)
+        }
+        let row = try rowFrame(latest, in: fixture)
+        let viewport = fixture.view.convert(scroll.contentView.bounds, from: scroll.contentView)
+        XCTAssertTrue(viewport.intersects(row), "The actual latest row must be laid out in the viewport", file: file, line: line)
+    }
+}
+
+@MainActor
+private final class CaptionFollowFixtureState: ObservableObject {
+    @Published var ids = (0..<24).map { _ in UUID() }
+    @Published var follow = true
+    @Published var anchor: UUID?
+    @Published var controlState: ControlActiveState
+    @Published var phase: ScenePhase
+    init(controlState: ControlActiveState, phase: ScenePhase) {
+        self.controlState = controlState
+        self.phase = phase
+    }
+}
+
+private struct CaptionFollowFixtureView: View {
+    @ObservedObject var state: CaptionFollowFixtureState
+    var body: some View {
+        CaptionHistoryScrollView(latestID: state.ids.last, followLatest: state.follow, captionAnchor: $state.anchor) {
+            LazyVStack(spacing: 0) {
+                ForEach(state.ids.reversed(), id: \.self) { id in
+                    Text("Synthetic caption \(id.uuidString.prefix(8))")
+                        .frame(maxWidth: .infinity, minHeight: 72, maxHeight: 72)
+                        .background(CaptionFollowRowProbe(id: id))
+                        .id(id)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .environment(\.controlActiveState, state.controlState)
+        .environment(\.scenePhase, state.phase)
+    }
+}
+
+private struct CaptionFollowRowProbe: NSViewRepresentable {
+    let id: UUID
+    func makeNSView(context: Context) -> NSView { NSView() }
+    func updateNSView(_ view: NSView, context: Context) {
+        view.identifier = NSUserInterfaceItemIdentifier(id.uuidString)
+    }
+}
 
 /// Real SwiftUI views, synthetic classroom, isolated preferences and queue.
 /// No microphone, language model, system translation, or real classroom data.
 @MainActor
 final class ClassroomPresentationTests: XCTestCase {
     private var presentationDefaults: UserDefaults?
+
+    func testCaptionArrivalFollowsInNonKeyClassroomWindow() async throws {
+        try await checkBackgroundCaptionArrival(controlState: .active, phase: .active)
+    }
+
+    func testCaptionArrivalFollowsInInactiveClassroomApplication() async throws {
+        try await checkBackgroundCaptionArrival(controlState: .inactive, phase: .inactive)
+    }
+
+    func testReturningKeyClassroomCatchesUpWithoutAnotherCaption() async throws {
+        try await checkBackgroundCaptionArrival(controlState: .active, phase: .active, refocus: true)
+    }
+
+    func testReturningActiveClassroomCatchesUpWithoutAnotherCaption() async throws {
+        try await checkBackgroundCaptionArrival(controlState: .inactive, phase: .inactive, refocus: true)
+    }
+
+    func testCaptionArrivalsWhileWindowIsOrderedOutCatchUpOnRedraw() async throws {
+        try await checkBackgroundCaptionArrival(controlState: .inactive, phase: .background, occluded: true)
+    }
+
+    private func checkBackgroundCaptionArrival(controlState: ControlActiveState, phase: ScenePhase,
+                                              refocus: Bool = false, occluded: Bool = false) async throws {
+        let (model, evidence, notebook) = try fixture(translation: .unavailable)
+        let appPhase = AppPhase.saved(URL(fileURLWithPath: "/synthetic-classroom"))
+        model.loadPresentationForTesting(phase: appPhase, evidence: evidence, notebook: notebook)
+        let defaults = try XCTUnwrap(presentationDefaults)
+        let bindings = CaptionFollowBindings()
+        func root(controlState: ControlActiveState, phase: ScenePhase) -> some View {
+            ContentView(followBindingsForTesting: bindings.capture).environmentObject(model).defaultAppStorage(defaults)
+                .environment(\.controlActiveState, controlState).environment(\.scenePhase, phase)
+        }
+        let controller = NSHostingController(rootView: root(controlState: controlState, phase: phase))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1260, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.contentViewController = controller
+        window.orderBack(nil)
+        defer { window.close() }
+        let view = controller.view
+        try await settle(view)
+        let history = try XCTUnwrap(descendants(view).compactMap { $0 as? NSScrollView }
+            .first { $0.bounds.width > 600 })
+        try XCTUnwrap(bindings.anchor).wrappedValue = evidence[evidence.count - 3].id
+        try await settle(view)
+        XCTAssertGreaterThan(history.contentView.bounds.minY, 100)
+        var latest = TranscriptSegment(startTime: 80, endTime: 89,
+            english: "A new synthetic caption while another application owns focus.",
+            chinese: "其他应用使用焦点期间到达的一段合成字幕。")
+        if refocus {
+            latest = try XCTUnwrap(evidence.last)
+            controller.rootView = root(controlState: .key, phase: .active)
+            if phase == .active {
+                NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+            } else {
+                NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApplication.shared)
+            }
+        } else if occluded {
+            window.orderOut(nil)
+            XCTAssertFalse(window.isVisible)
+            var pending = evidence
+            for index in 0..<3 {
+                latest = TranscriptSegment(startTime: Double(80 + index * 10), endTime: Double(89 + index * 10),
+                    english: "A synthetic caption during deferred layout \(index).", chinese: "延后布局期间的合成字幕。")
+                pending.append(latest)
+                model.loadPresentationForTesting(phase: appPhase, evidence: pending, notebook: notebook)
+                try await Task.sleep(for: .milliseconds(80))
+            }
+            window.orderBack(nil)
+            controller.rootView = root(controlState: .key, phase: .active)
+        } else {
+            model.loadPresentationForTesting(phase: appPhase, evidence: evidence + [latest], notebook: notebook)
+        }
+        try await settle(view)
+        XCTAssertEqual(history.contentView.bounds.minY, 0, accuracy: 3)
+        let row = try XCTUnwrap(descendants(view).first {
+            $0.identifier?.rawValue == "classroom-caption-\(latest.id)"
+        })
+        let viewport = view.convert(history.contentView.bounds, from: history.contentView)
+        XCTAssertTrue(viewport.intersects(view.convert(row.bounds, from: row)))
+        XCTAssertFalse(window.isKeyWindow)
+        XCTAssertEqual(window.alphaValue, 0)
+        XCTAssertFalse(NSApplication.shared.isActive, "The test host must remain in the background")
+        try capture(view, name: "follow-classroom-\(refocus ? "refocus" : occluded ? "deferred" : "arrival")-\(phase)")
+    }
 
     func testWaveformStopsRefreshingWithoutInputAndResumesForSamples() async throws {
         // Both motion policies use a synthetic calendar clock. The host's
@@ -246,7 +591,8 @@ final class ClassroomPresentationTests: XCTestCase {
         XCTAssertEqual(previewNotifications, 0)
         XCTAssertEqual(preview.rootBodies, 0, "Live preview must not invalidate the whole classroom")
         XCTAssertEqual(preview.summaryBodies, 0)
-        XCTAssertEqual(preview.inlineParses, 0)
+        XCTAssertGreaterThan(preview.liveInlineParses, 0, "Updated live formulas must render")
+        XCTAssertEqual(preview.inlineParses, preview.liveInlineParses, "Only the live text may parse during preview updates")
         XCTAssertGreaterThan(preview.previewBodies, 0, "The visible preview must still redraw")
         XCTAssertGreaterThan(preview.floatingBodies, 0, "Floating subtitles must observe the same live state")
         XCTAssertEqual(model.previewEnglishDisplay, "Synthetic live preview update 11.")
@@ -279,7 +625,8 @@ final class ClassroomPresentationTests: XCTestCase {
         XCTAssertEqual(streamingNotifications, 0)
         XCTAssertEqual(streaming.rootBodies, 0, "Streaming a caption must not rebuild unrelated classroom regions")
         XCTAssertEqual(streaming.summaryBodies, 0)
-        XCTAssertEqual(streaming.inlineParses, 0)
+        XCTAssertGreaterThan(streaming.liveInlineParses, 0, "Updated streamed formulas must render")
+        XCTAssertEqual(streaming.inlineParses, streaming.liveInlineParses, "Only the active caption may parse during token updates")
         XCTAssertEqual(streaming.previewBodies, 0, "Formal-caption tokens must not rebuild the live preview")
         XCTAssertEqual(streaming.floatingBodies, 0, "Formal-caption tokens must not rebuild floating preview subtitles")
         XCTAssertGreaterThan(streaming.streamingBodies, 0, "The active caption must still show streamed text")
@@ -306,7 +653,9 @@ final class ClassroomPresentationTests: XCTestCase {
         XCTAssertEqual(notifications, 0)
         XCTAssertEqual(previewDuringStream.rootBodies, 0)
         XCTAssertEqual(previewDuringStream.summaryBodies, 0)
-        XCTAssertEqual(previewDuringStream.inlineParses, 0)
+        XCTAssertGreaterThan(previewDuringStream.liveInlineParses, 0)
+        XCTAssertEqual(previewDuringStream.inlineParses, previewDuringStream.liveInlineParses,
+                       "A new preview may parse its own formulas, without reparsing the held caption or notes")
         XCTAssertEqual(previewDuringStream.streamingBodies, 0,
                        "A new spoken preview must not rebuild the held formal-caption row")
         XCTAssertGreaterThan(previewDuringStream.previewBodies, 0)
@@ -378,6 +727,246 @@ final class ClassroomPresentationTests: XCTestCase {
 
     @MainActor private final class FilePanelQuitProbe {
         var events: [String] = []
+        var scheduled: [@MainActor @Sendable () -> Void] = []
+
+        func runScheduledTermination() {
+            guard !scheduled.isEmpty else { XCTFail("Termination was not scheduled"); return }
+            scheduled.removeFirst()()
+        }
+    }
+
+    @MainActor private final class FilePanelChooserDouble {
+        let probe: FilePanelQuitProbe
+        var preventsTermination = true
+        var completesOnCancel = true
+        var completion: ((NSApplication.ModalResponse) -> Void)?
+
+        init(probe: FilePanelQuitProbe) { self.probe = probe }
+
+        var chooser: FilePanelPresentation.Chooser {
+            .init(allowTermination: { self.preventsTermination = false },
+                  present: { self.completion = $0; self.probe.events.append("present") },
+                  cancel: {
+                      self.probe.events.append("cancel-requested")
+                      if self.completesOnCancel { self.completion?(.cancel) }
+                  }, orderOut: { self.probe.events.append("order-out") })
+        }
+    }
+
+    func testUnitTestFilePanelGuardReplacesEveryOpenAndSavePresentationEntrypoint() throws {
+        XCTAssertTrue(AppRuntimeEnvironment.isUnitTesting)
+        XCTAssertTrue(UnitTestFilePanelSafety.isInstalled)
+        let selectors = [
+            ("beginWithCompletionHandler:", "isolatedTestFilePanelBeginWithCompletionHandler:"),
+            ("beginSheetModalForWindow:completionHandler:", "isolatedTestFilePanelBeginSheetForWindow:completionHandler:"),
+            ("runModal", "isolatedTestFilePanelRunModal")
+        ]
+        // Read dispatch tables without constructing or invoking a system panel.
+        for type: AnyClass in [NSSavePanel.self, NSOpenPanel.self] {
+            for (entrypoint, replacement) in selectors {
+                let entry = try XCTUnwrap(class_getInstanceMethod(type, NSSelectorFromString(entrypoint)))
+                let safe = try XCTUnwrap(class_getInstanceMethod(NSSavePanel.self, NSSelectorFromString(replacement)))
+                XCTAssertEqual(unsafeBitCast(method_getImplementation(entry), to: UInt.self),
+                               unsafeBitCast(method_getImplementation(safe), to: UInt.self),
+                               "\(NSStringFromClass(type)).\(entrypoint) must never call original AppKit presentation")
+            }
+        }
+    }
+
+    func testUnitTestFilePanelGuardCompletesOnceWithCancellation() {
+        var responses: [NSApplication.ModalResponse] = []
+        UnitTestFilePanelSafety.cancelPresentation { responses.append($0) }
+        XCTAssertEqual(responses, [.cancel])
+    }
+
+    func testFilePanelDefaultUnitTestChooserNeverEvaluatesLiveFactory() {
+        let probe = FilePanelQuitProbe()
+        let panel = FilePanelChooserDouble(probe: probe)
+        let chooser = FilePanelPresentation.chooser(isUnitTesting: AppRuntimeEnvironment.isUnitTesting) {
+            XCTFail("The unit test default must not construct a live panel adapter")
+            return panel.chooser
+        }
+        var responses: [NSApplication.ModalResponse] = []
+        chooser.allowTermination()
+        chooser.present { responses.append($0) }
+        chooser.cancel()
+        chooser.orderOut()
+        XCTAssertEqual(responses, [.cancel])
+        XCTAssertTrue(probe.events.isEmpty)
+        XCTAssertTrue(panel.preventsTermination)
+    }
+
+    func testFilePanelProductionPolicySelectsInjectedLiveChooser() {
+        let probe = FilePanelQuitProbe()
+        let panel = FilePanelChooserDouble(probe: probe)
+        var factories = 0
+        let chooser = FilePanelPresentation.chooser(isUnitTesting: false) {
+            factories += 1
+            return panel.chooser
+        }
+        XCTAssertEqual(factories, 1)
+        XCTAssertTrue(probe.events.isEmpty, "Selecting an adapter must not present it")
+        var responses: [NSApplication.ModalResponse] = []
+        chooser.allowTermination()
+        chooser.present { responses.append($0) }
+        panel.completion?(.OK)
+        XCTAssertFalse(panel.preventsTermination)
+        XCTAssertEqual(probe.events, ["present"])
+        XCTAssertEqual(responses, [.OK])
+    }
+
+    private func withFilePanelScheduler(_ operation: @MainActor (FilePanelQuitProbe) async -> Void) async {
+        let probe = FilePanelQuitProbe()
+        let previousScheduler = FilePanelPresentation.scheduleAfterEventForTesting
+        let previousAuthorization = FilePanelPresentation.authorizeTermination
+        FilePanelPresentation.scheduleAfterEventForTesting = { probe.scheduled.append($0) }
+        FilePanelPresentation.authorizeTermination = { true }
+        defer {
+            // Release a scheduled quit even if a preceding assertion failed.
+            while !probe.scheduled.isEmpty { probe.runScheduledTermination() }
+            FilePanelPresentation.scheduleAfterEventForTesting = previousScheduler
+            FilePanelPresentation.authorizeTermination = previousAuthorization
+        }
+        await operation(probe)
+    }
+
+    private func waitForFilePanel(_ condition: () -> Bool) async {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        XCTAssertTrue(condition(), "The synthetic chooser lifecycle did not finish")
+    }
+
+    func testFilePanelQuitWaitsForCancellationAcknowledgementAndCoalescesRequests() async {
+        await withFilePanelScheduler { probe in
+            let panel = FilePanelChooserDouble(probe: probe)
+            panel.completesOnCancel = false
+            FilePanelPresentation.begin(panel.chooser) { response in
+                XCTAssertEqual(response, .cancel, "A late OK response during quit cannot select a file")
+                probe.events.append("cancelled")
+            }
+            FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+            FilePanelPresentation.requestTermination { probe.events.append("duplicate-termination") }
+            XCTAssertEqual(probe.events, ["present", "cancel-requested"])
+            XCTAssertTrue(probe.scheduled.isEmpty, "Cancellation must be acknowledged before scheduling quit")
+            panel.completion?(.OK)
+            await waitForFilePanel { probe.scheduled.count == 1 }
+            XCTAssertEqual(probe.events, ["present", "cancel-requested", "order-out", "cancelled"])
+            probe.runScheduledTermination()
+            XCTAssertEqual(probe.events.last, "terminate")
+            XCTAssertFalse(probe.events.contains("duplicate-termination"))
+        }
+    }
+
+    func testFilePanelDeclinedQuitLeavesChooserOpenUntilAuthorizedRetry() async {
+        await withFilePanelScheduler { probe in
+            let panel = FilePanelChooserDouble(probe: probe)
+            var authorizations = 0
+            FilePanelPresentation.authorizeTermination = { authorizations += 1; return false }
+            FilePanelPresentation.begin(panel.chooser) { response in
+                XCTAssertEqual(response, .cancel)
+                probe.events.append("cancelled")
+            }
+            FilePanelPresentation.requestTermination { probe.events.append("declined-termination") }
+            XCTAssertEqual(authorizations, 1)
+            XCTAssertEqual(probe.events, ["present"], "Declining quit must not cancel or hide the chooser")
+            XCTAssertTrue(probe.scheduled.isEmpty)
+            FilePanelPresentation.authorizeTermination = { authorizations += 1; return true }
+            FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+            await waitForFilePanel { probe.scheduled.count == 1 }
+            probe.runScheduledTermination()
+            XCTAssertEqual(authorizations, 2)
+            XCTAssertEqual(probe.events, ["present", "cancel-requested", "order-out", "cancelled", "terminate"])
+        }
+    }
+
+    func testFilePanelQuitWaitsForEveryChooserAndSheetAndRejectsNewChoosers() async {
+        await withFilePanelScheduler { probe in
+            let first = FilePanelChooserDouble(probe: probe), second = FilePanelChooserDouble(probe: probe)
+            first.completesOnCancel = false
+            second.completesOnCancel = false
+            FilePanelPresentation.begin(first.chooser) { _ in probe.events.append("first-completed") }
+            FilePanelPresentation.begin(second.chooser) { _ in probe.events.append("second-completed") }
+            let sheet = UUID()
+            FilePanelPresentation.registerSheet(id: sheet) { probe.events.append("dismiss-sheet") }
+            defer { FilePanelPresentation.sheetDidDismiss(id: sheet) }
+            FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+            XCTAssertEqual(probe.events.filter { $0 == "cancel-requested" }.count, 2)
+            XCTAssertEqual(probe.events.filter { $0 == "dismiss-sheet" }.count, 1)
+            let lateProbe = FilePanelQuitProbe()
+            let late = FilePanelChooserDouble(probe: lateProbe)
+            var lateResponses: [NSApplication.ModalResponse] = []
+            FilePanelPresentation.begin(late.chooser) { lateResponses.append($0) }
+            XCTAssertEqual(lateResponses, [.cancel])
+            XCTAssertTrue(lateProbe.events.isEmpty, "A chooser requested during quit must never present")
+            XCTAssertTrue(late.preventsTermination, "Rejected choosers must not even be configured")
+            first.completion?(.cancel)
+            await waitForFilePanel { probe.events.contains("first-completed") }
+            XCTAssertTrue(probe.scheduled.isEmpty, "The second chooser still owns its presentation")
+            second.completion?(.cancel)
+            await waitForFilePanel { probe.events.contains("second-completed") }
+            XCTAssertTrue(probe.scheduled.isEmpty, "The SwiftUI sheet still owns its presentation")
+            FilePanelPresentation.sheetDidDismiss(id: sheet)
+            XCTAssertEqual(probe.scheduled.count, 1)
+            probe.runScheduledTermination()
+            XCTAssertEqual(probe.events.last, "terminate")
+        }
+    }
+
+    func testFilePanelNormalCompletionPreservesResponseAndReleasesOwner() async {
+        for response: NSApplication.ModalResponse in [.OK, .cancel] {
+            await withFilePanelScheduler { probe in
+                let panel = FilePanelChooserDouble(probe: probe)
+                var responses: [NSApplication.ModalResponse] = []
+                FilePanelPresentation.begin(panel.chooser) { responses.append($0) }
+                panel.completion?(response)
+                await waitForFilePanel { !responses.isEmpty }
+                XCTAssertEqual(responses, [response])
+                XCTAssertEqual(probe.events, ["present"], "Ordinary completion must not trigger quit cancellation")
+                FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+                XCTAssertEqual(probe.events, ["present", "terminate"])
+                XCTAssertTrue(probe.scheduled.isEmpty)
+            }
+        }
+    }
+
+    func testFilePanelDuplicateCallbacksCompleteAndTerminateOnlyOnce() async {
+        await withFilePanelScheduler { probe in
+            let panel = FilePanelChooserDouble(probe: probe)
+            panel.completesOnCancel = false
+            var responses: [NSApplication.ModalResponse] = []
+            FilePanelPresentation.begin(panel.chooser) { responses.append($0) }
+            FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+            panel.completion?(.cancel)
+            panel.completion?(.OK)
+            panel.completion?(.cancel)
+            await waitForFilePanel { probe.scheduled.count == 1 }
+            probe.runScheduledTermination()
+            panel.completion?(.cancel)
+            // Give all deliberately duplicated callbacks a turn on the actor.
+            try? await Task.sleep(for: .milliseconds(10))
+            XCTAssertEqual(responses, [.cancel])
+            XCTAssertEqual(probe.events.filter { $0 == "order-out" }.count, 1)
+            XCTAssertEqual(probe.events.filter { $0 == "terminate" }.count, 1)
+            XCTAssertTrue(probe.scheduled.isEmpty)
+        }
+    }
+
+    func testFilePanelCancelAllDoesNotRequestTermination() async {
+        await withFilePanelScheduler { probe in
+            let panel = FilePanelChooserDouble(probe: probe)
+            var responses: [NSApplication.ModalResponse] = []
+            FilePanelPresentation.begin(panel.chooser) { responses.append($0) }
+            FilePanelPresentation.cancelAll()
+            await waitForFilePanel { !responses.isEmpty }
+            XCTAssertEqual(responses, [.cancel])
+            XCTAssertEqual(probe.events, ["present", "cancel-requested"])
+            XCTAssertTrue(probe.scheduled.isEmpty)
+            FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+            XCTAssertEqual(probe.events.last, "terminate", "A completed cancellation must release the chooser owner")
+            XCTAssertTrue(probe.scheduled.isEmpty)
+        }
     }
 
     func testFilePanelQuitWithoutChoosersUsesNormalTerminationImmediately() {
@@ -441,26 +1030,18 @@ final class ClassroomPresentationTests: XCTestCase {
 
     func testFilePanelQuitCancelsChooserBeforeTermination() async throws {
         let probe = FilePanelQuitProbe()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
-                              styleMask: [.titled], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.makeKeyAndOrderFront(nil)
-        defer { window.close() }
-        let panel = NSOpenPanel()
-        panel.title = "Synthetic quit test — no file is selected"
-        defer { panel.cancel(nil); panel.orderOut(nil) }
-        FilePanelPresentation.begin(panel) { response in
+        let panel = FilePanelChooserDouble(probe: probe)
+        FilePanelPresentation.begin(panel.chooser) { response in
             XCTAssertEqual(response, .cancel)
             probe.events.append("cancelled")
         }
-        XCTAssertFalse(panel.preventsApplicationTerminationWhenModal)
+        XCTAssertFalse(panel.preventsTermination)
         FilePanelPresentation.requestTermination { probe.events.append("terminate") }
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while probe.events.last != "terminate", ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(2))
         }
-        XCTAssertEqual(probe.events, ["cancelled", "terminate"])
-        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(probe.events, ["present", "cancel-requested", "order-out", "cancelled", "terminate"])
     }
 
     func testNotesRenderingDuringUnrelatedPublishedUpdates() async throws {
@@ -659,9 +1240,12 @@ final class ClassroomPresentationTests: XCTestCase {
     }
 
     private func window(model: AppModel, width: CGFloat, height: CGFloat = 820,
-                        dark: Bool = false, notes: Bool = false) throws -> (NSWindow, NSView) {
+                        dark: Bool = false, notes: Bool = false,
+                        followBindings: CaptionFollowBindings? = nil) throws -> (NSWindow, NSView) {
         let defaults = try XCTUnwrap(presentationDefaults)
-        let root = AnyView(ContentView(showWholeLessonNotes: notes)
+        let classroom = followBindings.map { ContentView(followBindingsForTesting: $0.capture, showWholeLessonNotes: notes) }
+            ?? ContentView(showWholeLessonNotes: notes)
+        let root = AnyView(classroom
             .environmentObject(model)
             .defaultAppStorage(defaults)
             .environment(\.colorScheme, dark ? .dark : .light)
@@ -862,6 +1446,7 @@ final class ClassroomPresentationTests: XCTestCase {
         let (window, view) = try window(model: model, width: 1260)
         defer { window.close() }
         try await settle(view)
+        try captureWindow(window, name: "uifix2-toolbar-unlocked")
         let before = scrollFrames(in: view)
         let visible = Set(NSApp.windows.filter(\.isVisible).map(\.windowNumber))
         try click(window, content: view, x: view.bounds.width - 76, yFromTop: view.bounds.height - 18)
@@ -1019,16 +1604,19 @@ final class ClassroomPresentationTests: XCTestCase {
         let (model, evidence, notebook) = try fixture()
         let phase = AppPhase.saved(URL(fileURLWithPath: "/synthetic-classroom"))
         model.loadPresentationForTesting(phase: phase, evidence: evidence, notebook: notebook)
-        let (window, view) = try window(model: model, width: 1260, height: 700)
+        let bindings = CaptionFollowBindings()
+        let (window, view) = try window(model: model, width: 1260, height: 700, followBindings: bindings)
         defer { window.close() }
         try await settle(view)
         let history = try XCTUnwrap(descendants(view).compactMap { $0 as? NSScrollView }
             .first { $0.bounds.width > 600 })
-        // The follow control is in the top right of this synthetic transcript panel.
-        let historyFrame = view.convert(history.bounds, from: history)
-        try click(window, content: view, x: historyFrame.maxX - 47, yFromTop: 96)
-        history.contentView.scroll(to: NSPoint(x: 0, y: 200))
-        history.reflectScrolledClipView(history.contentView)
+        // Measure the control itself, rather than coupling the test to its font or bezel size.
+        let followProbe = try XCTUnwrap(descendants(view).first { $0.identifier?.rawValue == "classroom-follow-control" })
+        let followFrame = view.convert(followProbe.bounds, from: followProbe)
+        let followY = view.isFlipped ? followFrame.midY : view.bounds.height - followFrame.midY
+        try click(window, content: view, x: followFrame.midX, yFromTop: followY)
+        XCTAssertFalse(try XCTUnwrap(bindings.follow).wrappedValue, "The real toggle must turn follow off")
+        try XCTUnwrap(bindings.anchor).wrappedValue = evidence[evidence.count - 2].id
         try await settle(view)
         let oldOffset = history.contentView.bounds.minY
         XCTAssertGreaterThan(oldOffset, 100)
@@ -1051,7 +1639,7 @@ final class ClassroomPresentationTests: XCTestCase {
         // not changes to the estimated height of the entire document.
         XCTAssertEqual(after.minY, before.minY, accuracy: 1,
                        "The visible earlier caption must stay at the same screen position")
-        try click(window, content: view, x: historyFrame.maxX - 47, yFromTop: 96)
+        try click(window, content: view, x: followFrame.midX, yFromTop: followY)
         try await settle(view)
         XCTAssertEqual(history.contentView.bounds.minY, 0, accuracy: 3,
                        "Re-enabling follow must return to the newest caption")

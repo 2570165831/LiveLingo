@@ -298,7 +298,7 @@ struct LiveLingoCLI {
   let languageProbes = await ASRRequestCoordinator.shared.languageProbeCount - initialLanguageProbes
   writeEvent(verifiedRunEvent(segments: snapshot?.segments ?? [],
               otherLanguageTranscription: model.transcriptionProcessing?.otherLanguageCount ?? 0,
-              languageProbes: languageProbes))
+              languageProbes: languageProbes, noSpeechTranscription: model.savedNoSpeechCount))
  }
 
  /// Keep the parsed target in the same dispatch used by the real run. The
@@ -314,13 +314,13 @@ struct LiveLingoCLI {
  }
 
  static func verifiedRunEvent(segments: [TranscriptSegment], otherLanguageTranscription: Int,
-                              languageProbes: Int) -> [String: Any] {
-  ["event": "run_verified", "segments": segments.count,
+                              languageProbes: Int, noSpeechTranscription: Int = 0) -> [String: Any] {
+  TranscriptionProcessingState.addingNoSpeechStatistic(["event": "run_verified", "segments": segments.count,
    "pendingTranscription": 0, "unresolvedTranscription": 0,
    "otherLanguageTranscription": otherLanguageTranscription,
    "chineseCaptions": segments.filter { $0.sourceLanguage == "zh" }.count,
    "otherLanguageCaptions": segments.filter { $0.sourceLanguage != nil && $0.sourceLanguage != "zh" }.count,
-   "languageProbes": languageProbes]
+   "languageProbes": languageProbes], count: noSpeechTranscription)
  }
 
  /// Reopen a course this CLI created and bound. `resume` additionally continues
@@ -376,13 +376,15 @@ struct LiveLingoCLI {
    writeEvent(["event": "review_verified", "bytes": report.utf8.count])
   }
   let rebound = try bindSession(directory: root, source: marker.source)
-  writeEvent(["event": "reopen_verified", "mode": resume ? "resume-saved" : "open-saved",
+  writeEvent(TranscriptionProcessingState.addingNoSpeechStatistic([
+              "event": "reopen_verified", "mode": resume ? "resume-saved" : "open-saved",
               "sessionID": verified.sessionID.uuidString, "revision": verified.snapshot.inputRevision,
               "segments": verified.snapshot.segments.count, "batches": verified.snapshot.batches.count,
               "translated": verified.translatedCount, "summarized": verified.summarizedCount,
               "capture": verified.captureActive, "paused": verified.processingPaused,
               "otherLanguageTranscription": verified.transcription?.otherLanguageCount ?? 0,
-              "exports": verified.exports.map(\.name).sorted(), "reboundRevision": rebound.inputRevision])
+              "exports": verified.exports.map(\.name).sorted(), "reboundRevision": rebound.inputRevision],
+              count: verified.transcription?.noSpeechCount ?? verified.snapshot.processing.noSpeechCount ?? 0))
  }
 
  /// Export integrity only; it never proves a whole run. Zero valid captions pass
@@ -1032,6 +1034,10 @@ struct LiveLingoCLI {
       let count = rawCount as? Int, count > 0 {
     result["translationFailureReason"] = reason.rawValue
     result["translationFailureCount"] = count
+    if reason == .translationRejected, let code = fields["translationRejection"] as? String,
+       let rejection = TranslationAcceptance.Rejection(rawValue: code) {
+     result["translationRejection"] = rejection.rawValue
+    }
    }
    return result
   }
@@ -1046,6 +1052,8 @@ struct LiveLingoCLI {
     result[key] = value
    }
   }
+  if let raw = fields["noSpeechTranscription"], type(of: raw) == Int.self,
+     let count = raw as? Int, count > 0 { result["noSpeechTranscription"] = count }
   for key in ["summaryRunning", "concurrency", "paused", "capture"] { if let value = fields[key] as? Bool { result[key] = value } }
   for key in ["seconds", "stopSeconds"] { if let value = fields[key] as? Double, value.isFinite && value >= 0 { result[key] = value } }
   if let raw = fields["sessionID"] as? String, let id = UUID(uuidString: raw) { result["sessionID"] = id.uuidString }

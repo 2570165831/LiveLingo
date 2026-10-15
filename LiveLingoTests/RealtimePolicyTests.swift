@@ -1037,7 +1037,8 @@ final class RealtimePolicyTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "人工补充的内容\n")
         XCTAssertTrue(queue.hasWork)
         XCTAssertFalse(queue.running)
-        XCTAssertTrue(queue.status.contains("笔记与复查原文不同"))
+        XCTAssertEqual(queue.status, "1 项需要处理 · 已暂停")
+        XCTAssertTrue(queue.currentFailure?.contains("笔记与复查原文不同") == true)
     }
 
     func testLearningNotebookPreservesOldTopicsAndInvalidatesOnlyTheirEvidence() throws {
@@ -1615,7 +1616,8 @@ final class RealtimePolicyTests: XCTestCase {
         try queue.enqueue(directory: root, notebook: book)
         for _ in 0..<400 where !queue.canRemoveFailedJob { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertTrue(queue.canRemoveFailedJob)
-        XCTAssertTrue(queue.status.contains("字段 original"))
+        XCTAssertEqual(queue.status, "1 项需要处理 · 已暂停")
+        XCTAssertTrue(queue.currentFailure?.contains("字段 original") == true)
         XCTAssertFalse(queue.status.contains("PRIVATE-THINKING-MARKER"))
 
         let directory = root.appendingPathComponent("ReviewDiagnostics")

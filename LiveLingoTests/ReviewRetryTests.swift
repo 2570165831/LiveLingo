@@ -2,6 +2,44 @@ import Foundation
 import Testing
 @testable import LiveLingo
 
+struct ReviewFailureOrdinalTests {
+    @Test func workerMaximumIndexFormatsWithoutOverflow() throws {
+        let message = "review failure stage=additions code=empty_quote item=9223372036854775807 field=quote detail=synthetic"
+        let parsed = try #require(ReviewFailure.parseWorkerMessage(message))
+        #expect(parsed.itemIndex == Int.max)
+        #expect(parsed.description.contains("第 9223372036854775808 条补充建议"))
+        let classified = ReviewFailure.classify(QwenRuntimeError.requestFailed(message), defaultStage: .generation)
+        #expect(classified.errorDescription == parsed.description)
+        #expect(!parsed.description.contains("synthetic"))
+    }
+
+    @Test func everyOrdinalFieldHandlesSignedIntegerBoundaries() {
+        let cases: [(Int, String)] = [
+            (Int.min, "-9223372036854775807"), (Int.min + 1, "-9223372036854775806"),
+            (-1, "0"), (0, "1"), (1, "2"),
+            (Int.max - 1, "9223372036854775807"), (Int.max, "9223372036854775808")
+        ]
+        for (index, ordinal) in cases {
+            let failure = ReviewFailure(stage: .corrections, code: "empty_reason", detail: "synthetic",
+                batchIndex: index, batchCount: 3, itemIndex: index, pointIndex: index)
+            #expect(failure.description.contains("批次 \(ordinal)/3"))
+            #expect(failure.description.contains("第 \(ordinal) 条修正项"))
+            #expect(failure.description.contains("笔记要点 \(ordinal)"))
+            let withoutCount = ReviewFailure(stage: .input, code: "input_encode_failed", detail: "synthetic",
+                batchIndex: index, itemIndex: index)
+            #expect(withoutCount.description.contains("批次 \(ordinal)"))
+            #expect(withoutCount.description.contains("第 \(ordinal) 条项目"))
+        }
+    }
+
+    @Test func ordinaryDescriptionKeepsItsExactBytes() {
+        let failure = ReviewFailure(stage: .additions, code: "empty_quote", detail: "synthetic",
+            batchIndex: 1, batchCount: 3, itemIndex: 0, pointIndex: 2, field: "quote", responseBytes: 120)
+        let expected = "复查失败[核对补充建议]（批次 2/3 · 第 1 条补充建议 · 笔记要点 3 · 字段 quote）：补充建议缺少原文引用 · 响应 120 字节"
+        #expect(Array(failure.description.utf8) == Array(expected.utf8))
+    }
+}
+
 private actor C06ReviewGate {
     private var released = false
     private var waiter: CheckedContinuation<Void, Never>?
@@ -12,10 +50,70 @@ private actor C06ReviewGate {
     func release() { released = true; waiter?.resume(); waiter = nil }
 }
 
+private final class CloudReviewProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var attempts = 0
+    private var ready = false
+    var count: Int { lock.withLock { attempts } }
+    func allow() { lock.withLock { ready = true } }
+    func read(_ url: URL) throws {
+        try lock.withLock {
+            attempts += 1
+            if !ready { throw SessionStoreError.storageDeferred("合成课程还在云端，尚未下载") }
+        }
+    }
+}
+
 /// 第 1–3 项：有界自动重试、中断与失败分开、每场统计。
 @MainActor
 @Suite(.isolatedStorage)
 struct ReviewRetryTests {
+    @Test func cloudCourseDeferralRemainsRetryablePastModelBudgetAndNeverCountsAsFailure() async throws {
+        let directory = try makeDirectory(), journal = directory.appendingPathComponent("queue.json")
+        let notebook = makeNotebook()
+        try (notebook.markdown() + "\n").write(to: directory.appendingPathComponent("summary-zh-Hans.md"), atomically: true, encoding: .utf8)
+        let probe = CloudReviewProbe()
+        var generations = 0
+        let finalGeneration = C06ReviewGate()
+        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
+            generate: { _, _, _, _, _ in
+                generations += 1
+                if generations <= 2 { throw QwenRuntimeError.requestTimedOut }
+                await finalGeneration.wait()
+                return Self.emptyV2Response
+            }, now: Date.init, retryDelays: [0.05, 0.1])
+        do {
+            try await ReviewStorageTestHooks.$beforeSnapshotRead.withValue({ try probe.read($0) }) {
+                queue.setContext(recording: true, concurrent: true, resourcesAvailable: true)
+                try queue.enqueue(directory: directory, notebook: notebook)
+                queue.startAwaitingJob()
+                queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+                #expect(await waitFor({ probe.count >= 4 && !queue.running && queue.items.first?.retryPending != nil }, seconds: 3))
+                #expect(generations == 0)
+                #expect(queue.currentFailure == nil)
+                #expect(queue.status.contains("云端") && queue.status.contains("延后"))
+                try await queue.waitForPendingStorage()
+                let deferred = try persistedJournal(journal)
+                #expect((deferred.jobs.first?.stats?.failures ?? 0) == 0)
+                #expect(deferred.jobs.first?.retryPending?.code == "session_storageDeferred")
+                #expect(deferred.jobs.first?.retryPending?.attempts == 0)
+                #expect((deferred.jobs.first?.retryPending?.storageDeferrals ?? 0) >= 3)
+                #expect((deferred.jobs.first?.stats?.retries ?? 0) == 0)
+                #expect(!(deferred.jobs.first?.events ?? []).contains { $0.code == "failed" })
+                probe.allow()
+                #expect(await waitFor({ generations == 3 }, seconds: 3))
+                #expect(queue.items.first?.stats?.retries == 2)
+                await finalGeneration.release()
+                #expect(await waitFor({ !queue.hasWork && !queue.running }, seconds: 3))
+                #expect(generations == 3)
+                try await queue.waitForPendingStorage()
+                let finished = try persistedJournal(journal)
+                #expect((finished.retiredJobs?.first?.stats?.failures ?? 0) == 0)
+            }
+        } catch { await finalGeneration.release(); await queue.shutdownForTesting(); throw error }
+        await finalGeneration.release()
+        await queue.shutdownForTesting()
+    }
     private func makeNotebook(batches: Int = 1, label: String = "") -> LearningNotebook {
         var book = LearningNotebook()
         for index in 0..<batches {

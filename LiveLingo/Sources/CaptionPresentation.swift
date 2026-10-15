@@ -33,18 +33,28 @@ enum CaptionLanguageNames {
 /// Translation status and streamed text retain their existing dedicated views.
 struct CaptionPresentation: Equatable {
     let languageName: String?
+    let sourceLanguage: String?
     let isSourceOnly: Bool
     let primaryText: String
 
     init(sourceOnlyText: String) {
         languageName = nil
+        sourceLanguage = nil
         isSourceOnly = true
         primaryText = sourceOnlyText
     }
 
     init(_ segment: TranscriptSegment, locale: Locale = CaptionLanguageNames.interfaceLocale,
          target: CaptionTranslationTarget = .simplifiedChinese) {
+        if segment.isChineseOriginal {
+            languageName = "中文原文"
+            sourceLanguage = "zh"
+            isSourceOnly = true
+            primaryText = segment.english
+            return
+        }
         languageName = CaptionLanguageNames.name(for: SpokenLanguage.nonEnglishCode(segment.sourceLanguage), locale: locale)
+        sourceLanguage = segment.sourceLanguage
         isSourceOnly = target.keepsSourceAsCaption(language: segment.sourceLanguage)
         if isSourceOnly {
             primaryText = segment.hasUsableTranslation
@@ -57,7 +67,15 @@ struct CaptionPresentation: Equatable {
     init(_ segment: TranscriptSegment, outputLanguage: OutputLanguage,
          locale: Locale = CaptionLanguageNames.interfaceLocale,
          converter: ChineseScriptConverter = .shared) {
+        if segment.isChineseOriginal {
+            languageName = "中文原文"
+            sourceLanguage = "zh"
+            isSourceOnly = true
+            primaryText = segment.english
+            return
+        }
         languageName = CaptionLanguageNames.name(for: SpokenLanguage.nonEnglishCode(segment.sourceLanguage), locale: locale)
+        sourceLanguage = segment.sourceLanguage
         isSourceOnly = outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage)
         primaryText = isSourceOnly
             ? outputLanguage.renderForDisplay(SessionExporter.targetLine(segment, outputLanguage: outputLanguage), converter: converter)
@@ -91,6 +109,117 @@ struct CaptionPresentation: Equatable {
     }
 }
 
+/// Per-row action state is separate from the immutable caption and its stream.
+struct ChineseRecognitionRowPresentation {
+    static let actionTitle = "按中文重新识别"
+    static let undoTitle = "撤销中文重识别"
+    static let cancelTitle = "取消"
+    static let cancelActionTitle = "取消中文重识别"
+    static let waitingStatusText = "已排队：课堂结束并完成实时转写后按中文重新识别"
+
+    let isRecognizing: Bool
+    let isBusy: Bool
+    let canCancel: Bool
+    let canRecognize: Bool
+    let showsUndo: Bool
+    let canUndo: Bool
+    let unavailableReason: String?
+    let undoUnavailableReason: String?
+    let statusText: String?
+    let isFailure: Bool
+
+    var statusAccessibilityLabel: String? {
+        guard let statusText else { return nil }
+        guard canCancel else { return statusText }
+        let announcement = statusText.hasSuffix("…") ? String(statusText.dropLast()) : statusText
+        return "\(announcement)，可取消中文重识别。"
+    }
+
+    var cancelAccessibilityLabel: String {
+        canCancel && !isRecognizing ? "取消等待中的中文重识别" : Self.cancelActionTitle
+    }
+
+    var actionsAccessibilityLabel: String {
+        if isBusy { return "字幕操作：\(statusAccessibilityLabel ?? "")" }
+        if let reason = undoUnavailableReason {
+            return "字幕操作：暂不可重新识别或撤销，\(reason)"
+        }
+        if let reason = unavailableReason {
+            return "字幕操作：暂不可重新识别，\(reason)"
+        }
+        return "字幕操作：按中文重新识别或撤销"
+    }
+
+    var recognizeAccessibilityLabel: String {
+        guard let unavailableReason else { return Self.actionTitle }
+        return "\(Self.actionTitle)，暂不可重新识别：\(unavailableReason)"
+    }
+
+    var undoAccessibilityLabel: String {
+        guard let undoUnavailableReason else { return Self.undoTitle }
+        return "\(Self.undoTitle)，暂不可撤销：\(undoUnavailableReason)"
+    }
+
+    init(status: ChineseRecognitionStatus?, availability: ChineseRecognitionAvailability,
+         canUndo: Bool, courseActionsAvailability: ChineseRecognitionAvailability = .available) {
+        if case .recognizing? = status {
+            isRecognizing = true
+        } else {
+            isRecognizing = false
+        }
+        let busyReason: String?
+        switch status {
+        case .waitingForRealtime?:
+            isBusy = true
+            canCancel = true
+            statusText = Self.waitingStatusText
+            busyReason = Self.waitingStatusText + "；暂不能重新识别或撤销，可取消本次请求。"
+            isFailure = false
+        case .recognizing?:
+            isBusy = true
+            canCancel = true
+            statusText = "正在按中文重新识别…"
+            busyReason = "正在按中文重新识别，暂不能再次识别或撤销；可取消本次请求。"
+            isFailure = false
+        case .saving?:
+            isBusy = true
+            canCancel = false
+            statusText = "中文已识别，正在保存，暂不可撤销。"
+            busyReason = "正在保存中文识别结果，保存结束后才能重新识别或撤销，暂不可取消。"
+            isFailure = false
+        case .cancelled?:
+            isBusy = false
+            canCancel = false
+            statusText = "已取消中文重识别，原句已保留。"
+            busyReason = nil
+            isFailure = false
+        case .failed(let reason)?:
+            isBusy = false
+            canCancel = false
+            // Saving can fail after the Chinese source has already replaced
+            // the caption. Keep that notice instead of claiming it was unchanged.
+            statusText = canUndo && reason.contains("中文原文已保留") ? reason
+                : "按中文重新识别失败：\(reason)；原句已保留。"
+            busyReason = nil
+            isFailure = true
+        case .completed?, nil:
+            isBusy = false
+            canCancel = false
+            statusText = nil
+            busyReason = nil
+            isFailure = false
+        }
+        let courseReason = courseActionsAvailability.isAvailable ? nil
+            : courseActionsAvailability.reason ?? "课程当前不可操作，请稍后重试。"
+        canRecognize = availability.isAvailable && courseActionsAvailability.isAvailable && !isBusy
+        showsUndo = canUndo
+        self.canUndo = canUndo && !isBusy && courseActionsAvailability.isAvailable
+        unavailableReason = busyReason ?? courseReason ?? (availability.isAvailable ? nil
+            : availability.reason ?? "此句的录音已不可用，无法按中文重新识别。")
+        undoUnavailableReason = canUndo ? busyReason ?? courseReason : nil
+    }
+}
+
 /// Text selection is explicitly disabled for every native copy/select-all path.
 /// VoiceOver encounters this label separately from the selectable caption text.
 struct CaptionLanguageLabel: View {
@@ -113,6 +242,18 @@ enum SavedProcessingPresentation {
     private static let nonEnglishSpeech = "非英语讲话"
     static let untranscribedSpeech = nonEnglishSpeech + "（未转写）"
 
+    static func showsTranscriptionTask(_ record: TranscriptionWorkRecord) -> Bool {
+        record.needsWork || canRetryTranscription(record) || record.candidateText != nil
+    }
+
+    static func canRetryTranscription(_ record: TranscriptionWorkRecord) -> Bool {
+        [.failed, .otherLanguage, .noSpeech].contains(record.status)
+    }
+
+    static func noSpeechSummary(count: Int) -> String? {
+        count > 0 ? "未识别到讲话 \(count) 段" : nil
+    }
+
     static func languageSummary(segments: [TranscriptSegment], untranscribedCount: Int = 0) -> String? {
         let chinese = segments.filter { $0.sourceLanguage == "zh" }.count
         let other = segments.filter {
@@ -127,6 +268,7 @@ enum SavedProcessingPresentation {
 
     static func workSummary(_ state: TranscriptionProcessingState, segments: [TranscriptSegment]) -> String {
         let existing = "等待转写 \(state.pendingCount) 段 · 待确认或失败 \(state.unresolvedCount) 段"
+            + (noSpeechSummary(count: state.noSpeechCount).map { " · " + $0 } ?? "")
         // English-gate rejections already had a shorter summary before language tags.
         // Keep that exact wording when no confirmed multilingual caption is present.
         guard segments.contains(where: { SpokenLanguage.nonEnglishCode($0.sourceLanguage) != nil }) else {
@@ -149,6 +291,7 @@ enum SavedProcessingPresentation {
         case .silent: return "已确认无讲话"
         case .failed: return "转写失败"
         case .otherLanguage: return untranscribedSpeech
+        case .noSpeech: return "未识别到讲话"
         }
     }
 }

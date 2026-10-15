@@ -288,7 +288,7 @@ final class TargetReviewRegressionTests: XCTestCase {
             let manifest = try decoder.decode(SessionExporter.Manifest.self,
                 from: Data(contentsOf: directory.appendingPathComponent("manifest.json")))
             XCTAssertEqual(manifest.targetLocale, target.rawValue)
-            XCTAssertEqual(SessionExporter.savedSummaryURL(in: directory, targetLocale: saved.targetLocale).lastPathComponent,
+            XCTAssertEqual(try SessionExporter.savedSummaryURL(in: directory, targetLocale: saved.targetLocale).lastPathComponent,
                 SessionExporter.targetSummaryFileName(for: target.rawValue))
             XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent(
                 SessionExporter.targetTranscriptFileName(for: target.rawValue)).path))

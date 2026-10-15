@@ -79,6 +79,10 @@ _REQUEST_IDENTITIES = {}
 MAX_COMPLETION_RECEIPTS = 256
 MAX_INFERENCE_REQUESTS = 3  # one running, at most two submitted ahead
 INFERENCE_SLOTS = threading.BoundedSemaphore(MAX_INFERENCE_REQUESTS)
+# Explicit manual re-recognition must not consume formal ASR admission slots.
+# This separate bound covers upload, queueing, execution and deferred cleanup.
+MAX_MANUAL_INFERENCE_REQUESTS = 1
+MANUAL_INFERENCE_SLOTS = threading.BoundedSemaphore(MAX_MANUAL_INFERENCE_REQUESTS)
 IDLE_MODEL_SECONDS = 120.0
 IDLE_UNLOAD_RETRY_SECONDS = 5.0
 IDLE_MAINTENANCE = None
@@ -615,12 +619,44 @@ class ParakeetConfidenceRecorder:
                 "pk_confidence_valid": valid}
 
 
+def parakeet_word_spans(result):
+    """Reassemble whitespace-delimited words from timed decoder subwords.
+
+    Omit the optional field when timestamps cannot account for the full text;
+    legacy exact-range transcription must remain usable in that case.
+    """
+    try:
+        text, ranges = "", []
+        for sentence in result.sentences:
+            for token in sentence.tokens:
+                piece, start, end = token.text, float(token.start), float(token.end)
+                if not isinstance(piece, str) or not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
+                    return {}
+                if ranges and start < ranges[-1][2]:
+                    return {}
+                first = len(text)
+                text += piece
+                ranges.append((first, len(text), start, end))
+        if " ".join(text.split()) != " ".join(result.text.split()):
+            return {}
+        words = []
+        for match in re.finditer(r"\S+", text):
+            overlap = [r for r in ranges if r[0] < match.end() and r[1] > match.start()]
+            if not overlap:
+                return {}
+            words.append({"text": match.group(), "start": min(r[2] for r in overlap),
+                          "end": max(r[3] for r in overlap)})
+        return {"pk_word_spans": words} if words else {}
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return {}
+
+
 def transcribe_parakeet(model, model_input_path):
     unknown = {"pk_mean_probability": None, "pk_min_probability": None}
     # Older runtimes and synthetic protocol fixtures may not expose TDT joint.
     if not hasattr(model, "joint") or not hasattr(model, "vocabulary"):
         result = model.generate(model_input_path, verbose=False)
-        return {"text": result.text.strip(), **unknown}
+        return {"text": result.text.strip(), **unknown, **parakeet_word_spans(result)}
     import mlx.core as mx
     original = model.joint
     recorder = ParakeetConfidenceRecorder(original, len(model.vocabulary), mx)
@@ -632,17 +668,91 @@ def transcribe_parakeet(model, model_input_path):
             statistics = recorder.statistics(expected)
         except (AttributeError, TypeError):
             statistics = {**unknown, "pk_confidence_valid": False}
-        return {"text": result.text.strip(), **statistics}
+        return {"text": result.text.strip(), **statistics, **parakeet_word_spans(result)}
     finally:
         model.joint = original
 
 
+class ExplicitLanguageQualityError(ValueError):
+    """Only a fixed reason leaves the service; rejected text stays private."""
+    def __init__(self, reason):
+        super().__init__('ASR quality check failed')
+        self.reason = reason
+
+
+def chinese_quality_reason(text, audio_duration, generated_tokens):
+    """Chinese source quality plus conservative truncation/short-text checks."""
+    if (isinstance(generated_tokens, bool) or not isinstance(generated_tokens, int)
+            or generated_tokens < 0):
+        return 'invalid_metadata'
+    # generate() does not expose whether its last token was EOS. At the cap,
+    # reject conservatively rather than replace a sentence with a partial body.
+    if generated_tokens >= 256:
+        return 'truncated_transcript'
+    if not math.isfinite(audio_duration) or audio_duration <= 0:
+        return 'invalid_audio'
+    if not isinstance(text, str):
+        return 'invalid_text'
+    trimmed = text.strip()
+    if not trimmed:
+        return 'empty_transcript'
+    if '\uFFFD' in trimmed:
+        return 'invalid_text'
+    characters = ''.join(character for character in trimmed
+                         if character.isalpha() or character.isnumeric())
+    if not characters:
+        return 'invalid_text'
+    if audio_duration >= 8.0 and len(characters) == 1:
+        return 'implausibly_short'
+    if len(characters) > max(60, 12.0 * audio_duration):
+        return 'runaway_text'
+    if len(characters) >= 12:
+        for width in range(1, min(4, len(characters) // 2) + 1):
+            occurrences = {}
+            for start in range(len(characters) - width + 1):
+                unit = characters[start:start + width]
+                end, count = occurrences.get(unit, (0, 0))
+                if start < end:
+                    continue
+                count += 1
+                occurrences[unit] = (start + width, count)
+                if count >= 2 and count * width / len(characters) >= .60:
+                    return 'repeated_loop'
+    return None
+
+
+def transcribe_chinese(model, model_input_path):
+    """A user-selected sentence is decoded once, with no language probing."""
+    info = sf.info(model_input_path)
+    if info.samplerate <= 0 or info.frames <= 0:
+        raise ExplicitLanguageQualityError('invalid_audio')
+    audio_duration = info.frames / info.samplerate
+    if not math.isfinite(audio_duration):
+        raise ExplicitLanguageQualityError('invalid_audio')
+    result = model.generate(
+        model_input_path, language="Chinese", max_tokens=256,
+        temperature=0.0, verbose=False,
+    )
+    text = getattr(result, 'text', None)
+    generated_tokens = getattr(result, 'generation_tokens', None)
+    reason = chinese_quality_reason(text, audio_duration, generated_tokens)
+    if reason is not None:
+        raise ExplicitLanguageQualityError(reason)
+    return {"text": text.strip(), "language_mode": "explicit", "language": "zh",
+            "decode": "forced", "generated_tokens": generated_tokens,
+            "truncated": False, "policy": SOURCE_POLICY}
+
+
 def transcribe_audio(model_input_path: str, model_key: str, language_mode=None, probe_input_path=None, confirmed_language=None):
+    if language_mode == "Chinese" and (model_key not in {"0.6b", "1.7b"} or confirmed_language is not None):
+        raise ValueError('Unsupported explicit language request')
     # Keep MLX loading, evaluation and result access on one long-lived thread.
     with MODEL_LOCK:
         try:
             model = model_for(model_key)
             with measure("asr_inference"):
+                if language_mode == "Chinese":
+                    return transcribe_chinese(model, model_input_path)
                 if language_mode == "probe":
                     return probe_language_only(model, probe_input_path or model_input_path, model_key)
                 if language_mode == "auto":
@@ -871,7 +981,7 @@ class RequestLog:
 
 
 class PriorityInferenceExecutor:
-    """One tensor thread; queued formal work overtakes optional language heads.
+    """One tensor thread; formal work overtakes queued optional/manual work.
 
     A running tensor call is joined, never preempted. FIFO is preserved within
     each priority and Futures retain cancellation/timeout ownership semantics.
@@ -888,6 +998,9 @@ class PriorityInferenceExecutor:
         return self.enqueue(0, function, args, kwargs)
 
     def submit_probe(self, function, *args, **kwargs):
+        return self.enqueue(1, function, args, kwargs)
+
+    def submit_manual(self, function, *args, **kwargs):
         return self.enqueue(1, function, args, kwargs)
 
     def enqueue(self, priority, function, args, kwargs):
@@ -983,12 +1096,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         should_enhance = query.get("enhance", ["off"])[0] == "speech"
         languages = parse_qs(parsed.query, keep_blank_values=True).get("language", ["English"])
-        if len(languages) != 1 or languages[0] not in {"English", "auto", "probe"} or (
-            languages[0] in {"auto", "probe"} and model_key not in {"0.6b", "1.7b"}
+        if len(languages) != 1 or languages[0] not in {"English", "Chinese", "auto", "probe"} or (
+            languages[0] in {"Chinese", "auto", "probe"} and model_key not in {"0.6b", "1.7b"}
         ):
             self.send_json(400, {"error": "Unsupported language mode"})
             return
-        language_mode = languages[0] if languages[0] in {"auto", "probe"} else None
+        language_mode = languages[0] if languages[0] in {"Chinese", "auto", "probe"} else None
         confirmed = parse_qs(parsed.query, keep_blank_values=True).get("confirmed_language", [])
         if confirmed and (language_mode != "auto" or len(confirmed) != 1 or
                           confirmed[0] not in set(LANGUAGE_CODES.values()) - {"en"}):
@@ -1003,12 +1116,13 @@ class Handler(BaseHTTPRequestHandler):
         if size <= 0 or size > MAX_AUDIO_BYTES:
             self.send_json(413, {"error": "Audio body is empty or too large"})
             return
-        if not INFERENCE_SLOTS.acquire(blocking=False):
+        request_slots = MANUAL_INFERENCE_SLOTS if language_mode == "Chinese" else INFERENCE_SLOTS
+        if not request_slots.acquire(blocking=False):
             self.send_json(503, {"error": "ASR queue is full", "retryable": True})
             return
         request_id = self.headers.get('X-LiveLingo-Request-ID') or uuid.uuid4().hex
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', request_id):
-            INFERENCE_SLOTS.release()
+            request_slots.release()
             self.send_json(400, {"error": "Invalid request ID"})
             return
         with MODEL_STATE_LOCK:
@@ -1028,7 +1142,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def cleanup():
             finish_request(request_id, model_key)
-            INFERENCE_SLOTS.release()
+            request_slots.release()
             for path in {temporary_path, model_input_path} - {None}:
                 try:
                     release_temporary_audio(path)
@@ -1064,7 +1178,12 @@ class Handler(BaseHTTPRequestHandler):
             RequestLog.emit(f"ASR request id={log_id} model={model_key} bytes={size}")
             # Confirmed source bodies are optional refinements of an already
             # delivered caption. Fresh formal ASR also overtakes queued bodies.
-            submit = INFERENCE_WORKER.submit_probe if language_mode == "probe" or confirmed_language is not None else INFERENCE_WORKER.submit
+            if language_mode == "Chinese":
+                submit = INFERENCE_WORKER.submit_manual
+            elif language_mode == "probe" or confirmed_language is not None:
+                submit = INFERENCE_WORKER.submit_probe
+            else:
+                submit = INFERENCE_WORKER.submit
             arguments = (request_id, model_input_path, model_key, language_mode, temporary_path)
             if confirmed_language is not None:
                 arguments += (confirmed_language,)
@@ -1123,6 +1242,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Never answer with the owner's identity: a matched request_id
                 # and model would release the client's lease for the owner.
                 self.send_json(409, {"error": "Request ID is already in use"})
+            elif isinstance(error, ExplicitLanguageQualityError):
+                self.send_json(422, {"error": "ASR quality check failed", "reason": error.reason,
+                                     "request_id": request_id, "model": model_key})
             elif isinstance(error, ProbeQueueDeadlineExceeded):
                 self.send_json(504, {"error": "ASR queue deadline exceeded", "request_id": request_id,
                                      "model": model_key, "retryable": True})
@@ -1135,7 +1257,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if duplicate:
                 # This handler never owns the original request or its input.
-                INFERENCE_SLOTS.release()
+                request_slots.release()
             elif not cleanup_deferred:
                 cleanup()
 

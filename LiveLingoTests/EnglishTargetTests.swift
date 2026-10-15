@@ -236,7 +236,8 @@ final class EnglishTargetTests: XCTestCase {
             heights[mode] = host.bounds.height
         }
         XCTAssertEqual(heights[.bilingual], heights[.translationOnly])
-        XCTAssertLessThan(try XCTUnwrap(heights[.sourceOnly]), try XCTUnwrap(heights[.bilingual]))
+        XCTAssertEqual(heights[.sourceOnly], heights[.bilingual],
+                       "Every target now keeps a stable floating window while hidden slots yield their height")
     }
 
     private actor RequestCount {
