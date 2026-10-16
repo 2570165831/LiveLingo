@@ -24,22 +24,18 @@ Saved Chinese courses may offer **Reading text (阅读文字)** in **Recording p
 
 ## Download
 
-**[Download the complete 0.3.0 disk image]([待定])**: `.dmg` size [待定], SHA-256: [待定].
+**[Download the complete 0.3.0 disk image]([待定])**: `.dmg` about 14.2 GB (14,154,048,320 bytes), SHA-256: `1569a644522079237677a91d0fb63ea157d8212214958f3f9a2fd2406805973a`.
 
-See the [0.3.0 release page]([待定]) for downloads and verification instructions. If it offers split files, download and merge all parts as instructed there. A single part cannot be installed. The `Source code` archives are source code, not the installer.
+See the [0.3.0 release page](https://github.com/2570165831/LiveLingo/releases/tag/v0.3.0) for downloads and verification instructions. If it offers split files, download and merge all parts as instructed there. A single part cannot be installed. The `Source code` archives are source code, not the installer.
 
-**Does the first launch need an internet connection? [待定].**
+**You do not need an internet connection the first time you open LiveLingo.** Apple's notarization ticket is stapled to both the app and the disk image, so macOS can complete its security check offline. Optional system language resources may still need downloading; see Known limitations.
 
-<!-- Before release, choose one after testing the final installer, replace the sentence above, and remove this comment:
-Case 1: offline first launch passes → “You do not need an internet connection the first time you open LiveLingo. Optional system language resources may still need downloading; see Known limitations.”
-Case 2: offline first launch fails or has not been verified → “Keep your Mac online the first time you open LiveLingo. macOS may need to check the app's notarization record with Apple. This is a system security check, not LiveLingo uploading recordings.”
--->
 
 **Requirements**
 
 - **Computer**: Apple silicon Mac (M series). Intel Macs are not supported
 - **System**: macOS 14 or later
-- **Disk**: disk image [待定], installed app [待定], free space needed during installation [待定] (with split-file merging, if required: [待定]). You can delete the disk image afterwards
+- **Disk**: disk image about 14.2 GB, installed app about 16.3 GB; both are on disk during installation, so you need about 31 GB free (about 45 GB if you merge split files). You can delete the disk image afterwards
 
 ## Getting started
 

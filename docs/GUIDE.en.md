@@ -176,7 +176,7 @@ Keep the existing course files, address the space problem, and follow the app's 
 
 ### Do I need an internet connection on first launch?
 
-Offline first launch still needs confirmation with the final installer; see [Download in the README](../README.en.md#download).
+No. In 0.3.0 the notarization ticket is stapled to both the app and the disk image, so macOS can complete its security check offline the first time you open it (you will see “Verifying…” and then the usual prompt for an app downloaded from the internet).
 
 The main transcription, translation, and notes models in the complete offline installer do not need a model download. If a bundled model or runtime is missing, going online will not make the app fetch it automatically; check that your installation is complete.
 
