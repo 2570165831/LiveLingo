@@ -58,15 +58,27 @@ struct FullScreenApplicationEnvironment {
     var observeForegroundChanges: (@escaping @MainActor (Int32?) -> Void) -> AnyCancellable = { _ in AnyCancellable {} }
 
     static var live: Self {
-        Self(windows: { NSApp.windows },
-             orderedWindowNumbers: { (NSWindow.windowNumbers(options: .allSpaces) ?? []).map(\.intValue) },
-             mainWindow: { NSApp.mainWindow }, keyWindow: { NSApp.keyWindow }, isActive: { NSApp.isActive },
-             activationPolicy: { NSApp.activationPolicy() }, setActivationPolicy: {
+        live(application: { NSApp })
+    }
+
+    // SwiftUI can construct its StateObjects before NSApp exists on macOS 14.
+    // Resolve it at each use; never create NSApplication ahead of SwiftUI.
+    static func live(application: @escaping () -> NSApplication?) -> Self {
+        Self(windows: { application()?.windows ?? [] },
+             orderedWindowNumbers: {
+                 guard application() != nil else { return [] }
+                 return (NSWindow.windowNumbers(options: .allSpaces) ?? []).map(\.intValue)
+             },
+             mainWindow: { application()?.mainWindow }, keyWindow: { application()?.keyWindow },
+             isActive: { application()?.isActive ?? false },
+             activationPolicy: { application()?.activationPolicy() ?? .regular }, setActivationPolicy: {
+                 guard let application = application() else { return false }
                  precondition(!AppRuntimeEnvironment.isUnitTesting, "Tests must inject activation policy")
-                 return NSApp.setActivationPolicy($0)
-             }, unhide: { NSApp.unhideWithoutActivation() }, activate: {
+                 return application.setActivationPolicy($0)
+             }, unhide: { application()?.unhideWithoutActivation() }, activate: {
+                 guard let application = application() else { return }
                  precondition(!AppRuntimeEnvironment.isUnitTesting, "Tests must inject app activation")
-                 NSApp.activate(ignoringOtherApps: true)
+                 application.activate(ignoringOtherApps: true)
              }, foregroundApplicationPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
              observeUserInput: { action in
                  precondition(!AppRuntimeEnvironment.isUnitTesting, "Tests must inject user input")
@@ -135,7 +147,7 @@ final class LiveFullScreenApplication: FullScreenApplicationControlling {
     }
 
     func showMainWindow() {
-        NSApp.unhideWithoutActivation()
+        environment.unhide()
         if let mainWindow, mainWindow.contentView != nil {
             if mainWindow.isMiniaturized { mainWindow.deminiaturize(nil) }
             mainWindow.makeKeyAndOrderFront(nil)
@@ -592,7 +604,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     private let subtitles: any FullScreenSubtitleControlling
     private let schedule: (@escaping @MainActor () -> Void) -> Void
     private let observePopupLifetimes: (@escaping @MainActor () -> Void) -> AnyCancellable
-    private let originalActivationPolicy: NSApplication.ActivationPolicy
+    private var originalActivationPolicy: NSApplication.ActivationPolicy
     private var model: AppModel?
     private var recording = FullScreenRecordingCommands(state: { FullScreenRecordingState() }, toggle: {}, togglePause: {})
     private var observers: [AnyCancellable] = []
@@ -702,6 +714,9 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
 
     func start() {
         guard !started, !terminated else { return }
+        // Called after applicationDidFinishLaunching, before applying the saved
+        // class mode. Replace any pre-NSApp fallback with the real policy.
+        originalActivationPolicy = application.activationPolicy
         started = true
         if defaults.bool(forKey: Self.preferenceKey) {
             setEnabled(true, persist: false)

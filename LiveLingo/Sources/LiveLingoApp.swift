@@ -631,11 +631,11 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
             if let self { self.withRecordingTerminationAuthorization(terminate) }
             else { terminate() }
         }
-        FullScreenClassModeController.shared.start()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !AppRuntimeEnvironment.isUnitTesting else { return }
+        FullScreenClassModeController.shared.start()
         FullScreenClassModeController.shared.showMainWindowAfterLaunch()
     }
 
