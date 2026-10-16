@@ -8,6 +8,49 @@ import XCTest
 /// injected. The only native windows created here are never ordered onscreen.
 @MainActor
 final class FullScreenClassModeTests: XCTestCase {
+    func testLiveEnvironmentAndControllerCanInitializeBeforeApplicationExists() throws {
+        var application: NSApplication?
+        let environment = FullScreenApplicationEnvironment.live(application: { application })
+        XCTAssertTrue(environment.windows().isEmpty)
+        XCTAssertTrue(environment.orderedWindowNumbers().isEmpty)
+        XCTAssertNil(environment.mainWindow())
+        XCTAssertNil(environment.keyWindow())
+        XCTAssertFalse(environment.isActive())
+        XCTAssertEqual(environment.activationPolicy(), .regular)
+        XCTAssertFalse(environment.setActivationPolicy(.accessory))
+        environment.unhide()
+        environment.activate()
+
+        let f = try FSCFixture(testCase: self)
+        let live = LiveFullScreenApplication(environment: environment, notifications: f.notifications)
+        let controller = FullScreenClassModeController(defaults: f.defaults, application: live,
+            statusItem: f.status, subtitles: f.subtitles, notifications: f.notifications,
+            schedule: { f.scheduler.enqueue($0) })
+        controller.connect(model: f.model, recording: f.recording.commands)
+        let snapshot = live.windowSnapshot()
+        XCTAssertFalse(snapshot.hasWindows)
+        snapshot.cancel()
+        // The test host already owns NSApp; do not create or transform one.
+        application = try XCTUnwrap(NSApp)
+        XCTAssertEqual(live.activationPolicy, application?.activationPolicy())
+        controller.start()
+        controller.shutdown()
+        f.scheduler.drain()
+    }
+
+    func testLaunchResynchronizesInitialFallbackBeforeApplyingSavedClassMode() throws {
+        let f = try FSCFixture(testCase: self, savedEnabled: true)
+        // The app becomes available with a different policy after construction.
+        f.application.activationPolicy = .prohibited
+        f.controller.start()
+        XCTAssertTrue(f.controller.isEnabled)
+        XCTAssertEqual(f.application.activationPolicy, .accessory)
+        f.controller.start() // Must not overwrite the original with .accessory.
+        f.controller.shutdown()
+        XCTAssertEqual(f.application.activationPolicy, .prohibited)
+        XCTAssertTrue(f.defaults.bool(forKey: FullScreenClassModeController.preferenceKey))
+    }
+
     func testMenuBarIconDefaultsOffAndNormalModePreferenceInstallsWithoutActivation() throws {
         let fresh = try FSCFixture(testCase: self)
         XCTAssertFalse(fresh.controller.menuBarIconEnabled)
