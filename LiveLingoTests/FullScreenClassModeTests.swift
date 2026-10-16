@@ -10,7 +10,11 @@ import XCTest
 final class FullScreenClassModeTests: XCTestCase {
     func testLiveEnvironmentAndControllerCanInitializeBeforeApplicationExists() throws {
         var application: NSApplication?
-        let environment = FullScreenApplicationEnvironment.live(application: { application })
+        var environment = FullScreenApplicationEnvironment.live(application: { application })
+        // Window snapshots must not install real input/foreground monitors.
+        environment.observeUserInput = { _ in AnyCancellable {} }
+        environment.observeForegroundChanges = { _ in AnyCancellable {} }
+        environment.foregroundApplicationPID = { nil }
         XCTAssertTrue(environment.windows().isEmpty)
         XCTAssertTrue(environment.orderedWindowNumbers().isEmpty)
         XCTAssertNil(environment.mainWindow())
