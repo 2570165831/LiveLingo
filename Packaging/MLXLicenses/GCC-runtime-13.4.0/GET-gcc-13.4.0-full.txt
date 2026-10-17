@@ -1,0 +1,21 @@
+gcc-13.4.0-full.tar.xz is the GCC 13.4.0 corresponding source for the GNU
+runtime libraries (libgcc, libquadmath, libgfortran) that ship inside the
+bundled SciPy wheel. It is 130,471,676 bytes, which exceeds GitHub's 100 MB
+per-file limit, so it is not stored in this repository.
+
+Download:
+  https://github.com/2570165831/LiveLingo/releases/download/v0.3.0/gcc-13.4.0-full.tar.xz
+SHA-256:
+  defcacea843f6dd703f0760a90403b19cf5ca5cca08509251112e2533c4e9ce5
+
+Place it in this directory (Packaging/MLXLicenses/GCC-runtime-13.4.0/) before
+running the release packaging scripts; the audits pin this exact hash.
+
+Every released LiveLingo.app also contains the same archive at
+  Contents/Resources/LanguageRuntime/Licenses/GCC-runtime-13.4.0/gcc-13.4.0-full.tar.xz
+
+It is the GNU gcc-13.4.0 release with all files retained and a small,
+documented privacy normalization (see README.txt, SOURCE-COMPLETENESS.json and
+the archive's MODIFICATIONS.json). The unmodified GNU release is available at
+  https://ftp.gnu.org/gnu/gcc/gcc-13.4.0/gcc-13.4.0.tar.xz
+together with gcc-13.4.0-darwin.diff in this directory.

@@ -64,3 +64,7 @@ LiveLingo 20??-??-?? ??.??.??/
 # Python caches
 __pycache__/
 *.py[cod]
+
+# Exceeds GitHub's 100 MB file limit; published as a release asset instead.
+# See Packaging/MLXLicenses/GCC-runtime-13.4.0/GET-gcc-13.4.0-full.txt
+Packaging/MLXLicenses/GCC-runtime-13.4.0/gcc-13.4.0-full.tar.xz
