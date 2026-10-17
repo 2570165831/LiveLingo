@@ -2,7 +2,7 @@
 
 已发布版本的完整说明见各版本的发布说明：[0.2.0](https://github.com/2570165831/LiveLingo/releases/download/v0.2.0/RELEASE_NOTES_0.2.0.md)、[20260924](RELEASE_NOTES_20260924.md)、[20260922](RELEASE_NOTES_20260922.md)。
 
-## 0.3.0（2026-10-16 发布）
+## 0.3.0（2026-10-17 发布）
 
 App 版本 `0.3.0`，构建号 `20261016.1`，标签 `v0.3.0`。安装包从 [发布页](https://github.com/2570165831/LiveLingo/releases/tag/v0.3.0) 下载；完整改动、验证范围与已知问题见 [发布说明](https://github.com/2570165831/LiveLingo/releases/download/v0.3.0/RELEASE_NOTES_0.3.0.md)。
 
