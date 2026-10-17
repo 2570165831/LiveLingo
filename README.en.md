@@ -24,7 +24,7 @@ Saved Chinese courses may offer **Reading text (阅读文字)** in **Recording p
 
 ## Download
 
-**[Download the complete 0.3.0 disk image]([待定])**: `.dmg` about 14.2 GB (14,154,048,320 bytes), SHA-256: `1569a644522079237677a91d0fb63ea157d8212214958f3f9a2fd2406805973a`.
+**[Download the complete 0.3.0 disk image (Google Drive)](https://drive.google.com/file/d/10gwNMQlRPbeWryFTJNDpB1C9LcmB1Aur/view)**: `.dmg` about 14.2 GB (14,154,048,320 bytes), SHA-256: `1569a644522079237677a91d0fb63ea157d8212214958f3f9a2fd2406805973a`.
 
 See the [0.3.0 release page](https://github.com/2570165831/LiveLingo/releases/tag/v0.3.0) for downloads and verification instructions. If it offers split files, download and merge all parts as instructed there. A single part cannot be installed. The `Source code` archives are source code, not the installer.
 

@@ -30,7 +30,7 @@
 
 ## 下载
 
-**[下载 0.3.0 完整安装包]([待定])**：`.dmg` 约 14.2 GB（14,154,048,320 字节），SHA-256：`1569a644522079237677a91d0fb63ea157d8212214958f3f9a2fd2406805973a`。
+**[下载 0.3.0 完整安装包（Google Drive）](https://drive.google.com/file/d/10gwNMQlRPbeWryFTJNDpB1C9LcmB1Aur/view)**：`.dmg` 约 14.2 GB（14,154,048,320 字节），SHA-256：`1569a644522079237677a91d0fb63ea157d8212214958f3f9a2fd2406805973a`。
 
 安装包与核对说明见 [0.3.0 发布页](https://github.com/2570165831/LiveLingo/releases/tag/v0.3.0)。若发布页提供分卷，请按该页说明下载并合并全部分卷；单个分卷不能安装。`Source code` 是源码，不是安装包。
 
